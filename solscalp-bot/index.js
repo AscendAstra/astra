@@ -10,13 +10,17 @@ import { monitorActiveTrades } from './monitor/activeTrades.js';
 import { loadSettings } from './config/settings.js';
 import { log } from './utils/logger.js';
 import { getWalletBalance } from './wallet/custodial.js';
+import { startApiServer } from './api/server.js';
 
 let isRunning = false;
 
 async function main() {
   log('info', '=== SolScalp Bot Starting ===');
 
-  const settings = await loadSettings();
+  // Start HTTP API for dashboard
+  await startApiServer();
+
+  const settings = loadSettings();
 
   if (!settings.is_bot_active) {
     log('warn', 'Bot is disabled in settings. Set IS_BOT_ACTIVE=true to enable.');
