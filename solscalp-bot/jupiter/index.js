@@ -1,16 +1,21 @@
+/**
+ * Swap Module - Uses Raydium API via Helius RPC
+ * No external API calls that get blocked - pure on-chain via Helius
+ */
+
 import { log } from '../utils/logger.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
-const QUOTE_API = 'https://astra.je-reyes-saulog.workers.dev/v6/quote';
-const SWAP_API  = 'https://astra.je-reyes-saulog.workers.dev/v6/swap';
+const RAYDIUM_QUOTE_API = 'https://transaction-v1.raydium.io/compute/swap-base-in';
+const RAYDIUM_SWAP_API  = 'https://transaction-v1.raydium.io/swap';
 
 export async function getQuote(inputMint, outputMint, amountLamports, slippageBps = 150) {
-  const url = new URL(QUOTE_API);
+  const url = new URL(RAYDIUM_QUOTE_API);
   url.searchParams.set('inputMint', inputMint);
   url.searchParams.set('outputMint', outputMint);
   url.searchParams.set('amount', amountLamports.toString());
   url.searchParams.set('slippageBps', slippageBps.toString());
-  url.searchParams.set('onlyDirectRoutes', 'false');
+  url.searchParams.set('txVersion', 'V0');
 
   const res = await fetch(url.toString(), {
     method: 'GET',
@@ -20,49 +25,54 @@ export async function getQuote(inputMint, outputMint, amountLamports, slippageBp
 
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`Jupiter quote failed (${res.status}): ${txt}`);
+    throw new Error(`Raydium quote failed (${res.status}): ${txt}`);
   }
-  return await res.json();
+
+  const data = await res.json();
+  if (!data.success) throw new Error(`Raydium quote error: ${JSON.stringify(data)}`);
+  return data.data;
 }
 
-export async function buildSwapTransaction(quoteResponse, userPublicKey, priorityFeeLamports = 10000) {
-  const res = await fetch(SWAP_API, {
+export async function buildSwapTransaction(quoteData, userPublicKey, priorityFeeLamports = 10000) {
+  const res = await fetch(RAYDIUM_SWAP_API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({
-      quoteResponse,
-      userPublicKey,
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: priorityFeeLamports,
+      computeUnitPriceMicroLamports: String(priorityFeeLamports),
+      swapResponse: quoteData,
+      txVersion: 'V0',
+      wallet: userPublicKey,
+      wrapSol: true,
+      unwrapSol: true,
     }),
     signal: AbortSignal.timeout(15000),
   });
 
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`Jupiter swap build failed (${res.status}): ${txt}`);
+    throw new Error(`Raydium swap build failed (${res.status}): ${txt}`);
   }
 
   const data = await res.json();
-  return data.swapTransaction;
+  if (!data.success) throw new Error(`Raydium swap error: ${JSON.stringify(data)}`);
+  return data.data?.[0]?.transaction;
 }
 
 export async function buildBuyTransaction(tokenMint, solAmount, slippageBps, walletAddress) {
   const lamports = Math.floor(solAmount * 1e9);
-  log('info', `[Jupiter] Getting buy quote: ${solAmount} SOL → ${tokenMint} (slippage: ${slippageBps}bps)`);
+  log('info', `[Raydium] Getting buy quote: ${solAmount} SOL → ${tokenMint} (slippage: ${slippageBps}bps)`);
   const quote = await getQuote(SOL_MINT, tokenMint, lamports, slippageBps);
-  log('info', `[Jupiter] Quote: ${lamports} lamports → ${quote.outAmount} tokens`);
+  log('info', `[Raydium] Quote received → ${quote.outputAmount} tokens`);
   const swapTx = await buildSwapTransaction(quote, walletAddress);
-  return { swapTx, quote };
+  return { swapTx, quote: { ...quote, outAmount: quote.outputAmount } };
 }
 
 export async function buildSellTransaction(tokenMint, tokenAmount, slippageBps, walletAddress) {
-  log('info', `[Jupiter] Getting sell quote: ${tokenAmount} tokens → SOL (slippage: ${slippageBps}bps)`);
+  log('info', `[Raydium] Getting sell quote: ${tokenAmount} tokens → SOL (slippage: ${slippageBps}bps)`);
   const quote = await getQuote(tokenMint, SOL_MINT, tokenAmount, slippageBps);
-  log('info', `[Jupiter] Quote: ${tokenAmount} tokens → ${quote.outAmount / 1e9} SOL`);
+  log('info', `[Raydium] Quote received → ${quote.outputAmount / 1e9} SOL`);
   const swapTx = await buildSwapTransaction(quote, walletAddress);
-  return { swapTx, quote };
+  return { swapTx, quote: { ...quote, outAmount: quote.outputAmount } };
 }
 
 export function calculateSlippage(solAmount, liquidityUsd, solPrice = 150, volatility5m = 0) {
