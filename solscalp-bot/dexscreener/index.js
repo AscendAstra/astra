@@ -6,22 +6,87 @@ const DEXSCREENER_BASE = 'https://api.dexscreener.com';
 
 /**
  * Fetch top Solana tokens by volume
- * Returns up to 250 pairs sorted by 24h volume
+ * Uses multiple DexScreener endpoints to build a list of 250 tokens
  */
 export async function fetchTopSolanaTokens() {
-  const url = `${DEXSCREENER_BASE}/latest/dex/search?q=SOL&rankBy=volume&order=desc`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`DexScreener error: ${res.status}`);
+  const seen = new Map();
+
+  // Strategy: hit multiple DexScreener boosted/top endpoints + searches
+  const fetchers = [
+    fetchTokenProfiles(),
+    fetchBySearch('pump'),
+    fetchBySearch('sol'),
+    fetchBySearch('meme'),
+    fetchBySearch('cat'),
+    fetchBySearch('dog'),
+    fetchBySearch('pepe'),
+    fetchBySearch('moon'),
+    fetchBySearch('ai'),
+    fetchBySearch('based'),
+  ];
+
+  const results = await Promise.allSettled(fetchers);
+
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      for (const pair of result.value) {
+        if (!seen.has(pair.address)) {
+          seen.set(pair.address, pair);
+        }
+      }
+    }
+  }
+
+  // Sort by 24h volume descending, return top 250
+  return Array.from(seen.values())
+    .sort((a, b) => b.volume_24h - a.volume_24h)
+    .slice(0, 250);
+}
+
+async function fetchTokenProfiles() {
+  // DexScreener's token boosts endpoint — active/trending tokens
+  const res = await fetch(`${DEXSCREENER_BASE}/token-boosts/top/v1`);
+  if (!res.ok) return [];
   const data = await res.json();
 
-  return (data.pairs || [])
+  // Fetch full pair data for each boosted token on Solana
+  const solanaTokens = (Array.isArray(data) ? data : [])
+    .filter(t => t.chainId === 'solana')
+    .slice(0, 30);
+
+  const pairs = [];
+  for (const token of solanaTokens) {
+    try {
+      const tokenPairs = await fetchPairsForToken(token.tokenAddress);
+      pairs.push(...tokenPairs);
+    } catch {}
+  }
+  return pairs;
+}
+
+async function fetchPairsForToken(address) {
+  const res = await fetch(`${DEXSCREENER_BASE}/latest/dex/tokens/${address}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return filterAndNormalize(data.pairs || []);
+}
+
+async function fetchBySearch(query) {
+  const res = await fetch(`${DEXSCREENER_BASE}/latest/dex/search?q=${query}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return filterAndNormalize(data.pairs || []);
+}
+
+function filterAndNormalize(pairs) {
+  return pairs
     .filter(p =>
       p.chainId === 'solana' &&
       p.baseToken?.address &&
-      p.liquidity?.usd > 0 &&
-      p.marketCap > 0
+      (p.liquidity?.usd || 0) > 1000 &&
+      (p.marketCap || p.fdv || 0) > 0 &&
+      (p.volume?.h24 || 0) > 500
     )
-    .slice(0, 250)
     .map(normalizePair);
 }
 
