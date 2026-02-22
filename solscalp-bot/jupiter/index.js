@@ -1,8 +1,8 @@
 import { log } from '../utils/logger.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
-const QUOTE_API = 'https://quote-api.jup.ag/v6/quote';
-const SWAP_API = 'https://quote-api.jup.ag/v6/swap';
+const QUOTE_API = 'https://astra.je-reyes-saulog.workers.dev/v6/quote';
+const SWAP_API  = 'https://astra.je-reyes-saulog.workers.dev/v6/swap';
 
 export async function getQuote(inputMint, outputMint, amountLamports, slippageBps = 150) {
   const url = new URL(QUOTE_API);
