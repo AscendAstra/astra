@@ -39,3 +39,5 @@ export async function buildSwapTransaction(quoteResponse, userPublicKey, priorit
     userPublicKey,
     wrapAndUnwrapSol: true,
     dynamicComputeUnitLimit: true
+return Math.min(baseBps, 500);
+}
