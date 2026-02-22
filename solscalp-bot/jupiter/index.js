@@ -5,8 +5,9 @@
 
 import { log } from '../utils/logger.js';
 
-const QUOTE_API   = 'https://quote-api.jup.ag/v6/quote';
-const SWAP_API    = 'https://quote-api.jup.ag/v6/swap';
+const HELIUS_KEY  = process.env.HELIUS_API_KEY;
+const QUOTE_API   = `https://mainnet.helius-rpc.com/quote?api-key=${HELIUS_KEY}`;
+const SWAP_API    = `https://mainnet.helius-rpc.com/swap?api-key=${HELIUS_KEY}`;
 const SOL_MINT    = 'So11111111111111111111111111111111111111112';
 const WSOL_MINT   = 'So11111111111111111111111111111111111111112';
 
