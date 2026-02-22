@@ -25,7 +25,12 @@ export async function getQuote(inputMint, outputMint, amountLamports, slippageBp
   url.searchParams.set('slippageBps', slippageBps.toString());
   url.searchParams.set('onlyDirectRoutes', 'false');
 
-  const res = await fetch(url.toString());
+ const res = await fetch(url.toString(), {
+  headers: {
+    'Accept': 'application/json',
+    'User-Agent': 'Mozilla/5.0',
+  }
+});
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`Jupiter quote failed (${res.status}): ${txt}`);
