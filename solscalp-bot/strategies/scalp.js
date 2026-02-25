@@ -4,7 +4,7 @@
  * Exit: $800K MC (80% at 70% profit, rest at 100%)
  * Stop Loss: -20%
  */
-
+import { isMarketDangerous, getAlertLevel } from '../utils/marketGuard.js';
 import { fetchTopSolanaTokens } from '../dexscreener/index.js';
 import { computeHealthScore, basicHoneypotCheck } from '../analysis/scoring.js';
 import { buildBuyTransaction, buildSellTransaction, calculateSlippage } from '../jupiter/index.js';
@@ -20,9 +20,16 @@ import { log } from '../utils/logger.js';
 
 const STRATEGY = 'scalp';
 
+// Missed opportunity tracking
+const monitorCounts = new Map(); // address → { count, symbol, firstMC, firstSeen }
+const MONITOR_ALERT_THRESHOLD = 5; // scans before we flag it
 export async function monitorScalpOpportunities() {
   const settings = loadSettings();
   if (!settings.scalp_enabled) return;
+ if (isMarketDangerous()) {
+    log('warn', `[SCALP] 🛡 Market guard active (${getAlertLevel()}). Skipping all entries.`);
+    return;
+  }
 
   log('info', '[SCALP] Scanning DexScreener for scalp opportunities...');
 
@@ -86,8 +93,38 @@ async function evaluateScalpToken(token, settings) {
 
   log('info', `[SCALP] ${token.symbol} — MC: $${(token.market_cap/1000).toFixed(0)}K | Health: ${health.health_score} | ${health.recommendation} | Flags: ${health.flags.join(', ') || 'none'}`);
 
-  if (!health.should_trade) return;
+  if (!health.should_trade) {
+    // Track how long this token sits in MONITOR
+    if (health.recommendation === 'MONITOR') {
+      const existing = monitorCounts.get(token.address);
+      if (!existing) {
+        monitorCounts.set(token.address, {
+          count: 1,
+          symbol: token.symbol,
+          firstMC: token.market_cap,
+          firstSeen: new Date().toISOString(),
+          flags: health.flags
+        });
+      } else {
+        existing.count++;
+        existing.latestMC = token.market_cap;
+        existing.latestFlags = health.flags;
+        if (existing.count === MONITOR_ALERT_THRESHOLD) {
+          log('warn', `[SCALP] [MISSED?] ${token.symbol} — stuck in MONITOR for ${existing.count} scans | Entry MC: $${(existing.firstMC/1000).toFixed(0)}K → Now: $${(token.market_cap/1000).toFixed(0)}K | Flags: ${health.flags.join(', ') || 'none'}`);
+        }
+      }
+    }
+    return;
+  }
 
+  // Clear monitor tracking if it eventually executes
+  if (monitorCounts.has(token.address)) {
+    const tracked = monitorCounts.get(token.address);
+    if (tracked.count >= MONITOR_ALERT_THRESHOLD) {
+      log('info', `[SCALP] [MONITOR→EXECUTE] ${token.symbol} — cleared after ${tracked.count} scans | Was stuck at: $${(tracked.firstMC/1000).toFixed(0)}K`);
+    }
+    monitorCounts.delete(token.address);
+  }
   // 6. Execute buy
   await executeScalpBuy(token, settings, health);
 }

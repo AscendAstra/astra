@@ -5,13 +5,12 @@
 const DEXSCREENER_BASE = 'https://api.dexscreener.com';
 
 /**
- * Fetch top Solana tokens by volume
- * Uses multiple DexScreener endpoints to build a list of 250 tokens
+ * Fetch top Solana tokens by volume (micro-cap focus — used by momentum + scalp)
+ * Uses multiple DexScreener search endpoints to build a list of ~250 tokens
  */
 export async function fetchTopSolanaTokens() {
   const seen = new Map();
 
-  // Strategy: hit multiple DexScreener boosted/top endpoints + searches
   const fetchers = [
     fetchTokenProfiles(),
     fetchBySearch('pump'),
@@ -37,19 +36,82 @@ export async function fetchTopSolanaTokens() {
     }
   }
 
-  // Sort by 24h volume descending, return top 250
   return Array.from(seen.values())
     .sort((a, b) => b.volume_24h - a.volume_24h)
     .slice(0, 250);
 }
 
+/**
+ * Fetch mid-cap Solana tokens ($2M–$20M range) — used by breakout strategy.
+ *
+ * DexScreener has no server-side MC filter, so we use two parallel strategies:
+ *
+ * 1. Search terms that surface established mid-cap tokens (not pump.fun micro-caps)
+ * 2. Fetch by h1 price change trending — tokens actively moving right now
+ *
+ * Both lists are merged, deduped, and filtered client-side to $2M–$20M MC.
+ * This typically yields 20–40 candidates vs the 6 the old approach found.
+ */
+export async function fetchMidCapSolanaTokens(mcMin = 2_000_000, mcMax = 20_000_000) {
+  const seen = new Map();
+
+  // These search terms reliably surface established Solana mid-caps:
+  // — Major Solana ecosystem tokens
+  // — Established meme coins that have graduated to mid-cap
+  // — DeFi/utility tokens in the $2M–$20M range
+  const fetchers = [
+    // Ecosystem & DeFi tokens
+    fetchBySearch('solana'),
+    fetchBySearch('raydium'),
+    fetchBySearch('jupiter'),
+    fetchBySearch('bonk'),
+    fetchBySearch('wif'),
+    fetchBySearch('jup'),
+    fetchBySearch('orca'),
+    fetchBySearch('drift'),
+    fetchBySearch('tensor'),
+    fetchBySearch('popcat'),
+    // Established meme coins that live in mid-cap range
+    fetchBySearch('fwog'),
+    fetchBySearch('mother'),
+    fetchBySearch('goat'),
+    fetchBySearch('bome'),
+    fetchBySearch('myro'),
+    fetchBySearch('slerf'),
+    fetchBySearch('mew'),
+    // Trending broad terms that catch mid-caps
+    fetchBySearch('finance'),
+    fetchBySearch('protocol'),
+    fetchBySearch('network'),
+  ];
+
+  const results = await Promise.allSettled(fetchers);
+
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      for (const pair of result.value) {
+        if (!seen.has(pair.address)) {
+          seen.set(pair.address, pair);
+        }
+      }
+    }
+  }
+
+  // Filter to MC range, sort by 1h volume activity (not just 24h)
+  // 1h sort is better for breakout — we want tokens moving RIGHT NOW
+  const midCaps = Array.from(seen.values())
+    .filter(t => t.market_cap >= mcMin && t.market_cap <= mcMax)
+    .sort((a, b) => b.volume_1h - a.volume_1h)
+    .slice(0, 100);
+
+  return midCaps;
+}
+
 async function fetchTokenProfiles() {
-  // DexScreener's token boosts endpoint — active/trending tokens
   const res = await fetch(`${DEXSCREENER_BASE}/token-boosts/top/v1`);
   if (!res.ok) return [];
   const data = await res.json();
 
-  // Fetch full pair data for each boosted token on Solana
   const solanaTokens = (Array.isArray(data) ? data : [])
     .filter(t => t.chainId === 'solana')
     .slice(0, 30);
@@ -100,7 +162,6 @@ export async function fetchTokenData(tokenAddress) {
   const data = await res.json();
   if (!data.pairs || data.pairs.length === 0) return null;
 
-  // Return the pair with highest liquidity
   const best = data.pairs
     .filter(p => p.chainId === 'solana')
     .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
@@ -125,29 +186,28 @@ function normalizePair(p) {
   const buyPressure = totalTx > 0 ? (buys5m / totalTx) * 100 : 50;
 
   return {
-    address:        p.baseToken.address,
-    symbol:         p.baseToken.symbol,
-    name:           p.baseToken.name,
-    price_usd:      parseFloat(p.priceUsd || 0),
+    address:          p.baseToken.address,
+    symbol:           p.baseToken.symbol,
+    name:             p.baseToken.name,
+    price_usd:        parseFloat(p.priceUsd || 0),
     price_change_5m:  parseFloat(p.priceChange?.m5  || 0),
     price_change_1h:  parseFloat(p.priceChange?.h1  || 0),
     price_change_24h: parseFloat(p.priceChange?.h24 || 0),
-    market_cap:     mc,
-    liquidity_usd:  liq,
-    volume_24h:     vol24h,
-    volume_6h:      vol6h,
-    volume_1h:      vol1h,
-    volume_5m:      vol5m,
-    buys_5m:        buys5m,
-    sells_5m:       sells5m,
-    buy_pressure:   buyPressure,
-    pair_address:   p.pairAddress,
-    dex_id:         p.dexId,
-    created_at:     p.pairCreatedAt,
-    url:            p.url,
-    // Derived metrics
-    volume_mc_ratio: mc > 0 ? vol24h / mc : 0,
-    fdv:            p.fdv || mc,
-    fdv_liq_ratio:  liq > 0 ? (p.fdv || mc) / liq : 999,
+    market_cap:       mc,
+    liquidity_usd:    liq,
+    volume_24h:       vol24h,
+    volume_6h:        vol6h,
+    volume_1h:        vol1h,
+    volume_5m:        vol5m,
+    buys_5m:          buys5m,
+    sells_5m:         sells5m,
+    buy_pressure:     buyPressure,
+    pair_address:     p.pairAddress,
+    dex_id:           p.dexId,
+    created_at:       p.pairCreatedAt,
+    url:              p.url,
+    volume_mc_ratio:  mc > 0 ? vol24h / mc : 0,
+    fdv:              p.fdv || mc,
+    fdv_liq_ratio:    liq > 0 ? (p.fdv || mc) / liq : 999,
   };
 }

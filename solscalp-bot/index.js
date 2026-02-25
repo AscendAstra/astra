@@ -2,15 +2,20 @@
  * SolScalp Trading Bot - Main Entry Point
  * Runs all three strategies concurrently on Railway
  */
-
+import 'dotenv/config';
 import { monitorScalpOpportunities } from './strategies/scalp.js';
 import { monitorMomentumOpportunities } from './strategies/momentum.js';
 import { monitorBreakoutOpportunities } from './strategies/breakout.js';
 import { monitorActiveTrades } from './monitor/activeTrades.js';
+import { runFastStopLossCheck } from './monitor/fastStopLoss.js';
 import { loadSettings } from './config/settings.js';
 import { log } from './utils/logger.js';
 import { getWalletBalance } from './wallet/custodial.js';
 import { startApiServer } from './api/server.js';
+import { notify } from './utils/discord.js';
+import { diffSettings, saveSettingsSnapshot, formatChanges } from './utils/settingsDiff.js';
+
+console.log('Discord webhook URL:', process.env.DISCORD_WEBHOOK_URL ? 'LOADED ✅' : 'MISSING ❌');
 
 let isRunning = false;
 
@@ -30,10 +35,22 @@ async function main() {
   const balance = await getWalletBalance();
   log('info', `Custodial wallet balance: ${balance} SOL`);
 
-  if (balance < settings.default_trade_amount_sol) {
-    log('error', `Insufficient balance (${balance} SOL). Need at least ${settings.default_trade_amount_sol} SOL.`);
-    process.exit(1);
+  // Diff settings against last snapshot — credentials are never included
+  const rawChanges       = diffSettings(settings);
+  const formattedChanges = formatChanges(rawChanges);
+
+  if (rawChanges.length > 0) {
+    log('info', `[CONFIG] ${rawChanges.length} setting(s) changed since last run:`);
+    for (const c of rawChanges) {
+      log('info', `  ${c.key}: ${c.oldVal} → ${c.newVal}`);
+    }
   }
+
+  // Fire Discord — includes change summary if anything changed
+  await notify.botStarted(balance, formattedChanges);
+
+  // Save snapshot AFTER posting so next restart can diff against this run
+  saveSettingsSnapshot(settings);
 
   isRunning = true;
   log('info', 'All systems nominal. Starting strategy loops...');
@@ -43,6 +60,7 @@ async function main() {
   runStrategyLoop('MOMENTUM', monitorMomentumOpportunities, settings.momentum_interval_ms || 5 * 60 * 1000);
   runStrategyLoop('BREAKOUT', monitorBreakoutOpportunities, settings.breakout_interval_ms || 5 * 60 * 1000);
   runStrategyLoop('MONITOR',  monitorActiveTrades,          settings.monitor_interval_ms  || 60 * 1000);
+  runStrategyLoop('FAST_SL',  runFastStopLossCheck,         settings.fast_sl_interval_ms  || 10_000);
 }
 
 async function runStrategyLoop(name, fn, intervalMs) {

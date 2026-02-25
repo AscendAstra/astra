@@ -7,7 +7,7 @@
  * MOMENTUM:  MC reaches $250K–$300K → sell | -20% → stop loss
  * BREAKOUT:  30% profit OR sell pressure detected → sell | -20% → stop loss
  */
-
+import { isRedAlert, isOrangeOrAbove } from '../utils/marketGuard.js';
 import { fetchTokenData } from '../dexscreener/index.js';
 import { buildSellTransaction, calculateSlippage } from '../jupiter/index.js';
 import { signAndSendTransaction, getWalletAddress } from '../wallet/custodial.js';
@@ -18,6 +18,9 @@ import {
 } from '../store/trades.js';
 import { loadSettings } from '../config/settings.js';
 import { log } from '../utils/logger.js';
+import { recordMomentumStopLoss } from '../strategies/momentum.js';
+import { recordBreakoutExit } from '../strategies/breakout.js';
+import { notify } from '../utils/discord.js';
 
 export async function monitorActiveTrades() {
   const settings  = loadSettings();
@@ -55,6 +58,25 @@ async function checkTradeExit(trade, settings) {
   }
 
   log('info', `[MONITOR] ${trade.token_symbol} (${trade.strategy}) — P&L: ${pnlPercent.toFixed(2)}% | MC: $${(token.market_cap/1000).toFixed(0)}K`);
+ // ── MARKET GUARD: RED ALERT — close momentum positions immediately ──────────
+  if (isRedAlert() && trade.strategy === 'momentum') {
+    log('warn', `[MONITOR] 🔴 RED ALERT — Force closing momentum position: ${trade.token_symbol}`);
+    await executeSell(trade, token, settings, 'market_guard_red', 100);
+    return;
+  }
+
+  // ── MARKET GUARD: ORANGE ALERT — tighten stop losses ──────────────────────
+  if (isOrangeOrAbove() && trade.strategy === 'momentum') {
+    const tightenedStop = (trade.stop_loss_percent || settings.stop_loss_percent) * 0.5;
+    const tightenedPnl  = -(tightenedStop);
+    if (pnlPercent <= tightenedPnl) {
+      log('warn', `[MONITOR] 🟠 ORANGE ALERT — Tightened stop hit for ${trade.token_symbol} (${pnlPercent.toFixed(2)}%). Selling.`);
+      if (trade.strategy === 'momentum') recordMomentumStopLoss(trade.token_address);
+      await executeSell(trade, token, settings, 'market_guard_orange', 100);
+      return;
+    }
+  }
+
 
   // ── TRAILING STOP ──────────────────────────────────────────────────────────
   if (settings.trailing_stop_enabled && trade.highest_price) {
@@ -70,6 +92,8 @@ async function checkTradeExit(trade, settings) {
   const stopLoss = -(trade.stop_loss_percent || settings.stop_loss_percent);
   if (pnlPercent <= stopLoss) {
     log('warn', `[MONITOR] ${trade.token_symbol} — Stop loss hit (${pnlPercent.toFixed(2)}%). Selling.`);
+    if (trade.strategy === 'momentum') recordMomentumStopLoss(trade.token_address);
+if (trade.strategy === 'breakout') recordBreakoutExit(trade.token_address);
     await executeSell(trade, token, settings, 'stop_loss', 100);
     return;
   }
@@ -103,9 +127,9 @@ async function checkScalpExit(trade, token, pnlPercent, settings) {
   }
 
   // Also exit if MC has reached target ($800K)
-  if (token.market_cap >= 800_000) {
+ if (token.market_cap >= settings.scalp_exit_mc) {
     const sellPct = trade.partial_exit_executed ? 100 : 80;
-    log('info', `[SCALP] ${trade.token_symbol} — MC target $800K reached. Selling ${sellPct}%.`);
+    log('info', `[SCALP] ${trade.token_symbol} — MC target $${(settings.scalp_exit_mc/1000).toFixed(0)}K reached. Selling ${sellPct}%.`);
     await executeSell(trade, token, settings, 'mc_target', sellPct);
   }
 }
@@ -138,7 +162,7 @@ async function checkBreakoutExit(trade, token, pnlPercent, settings) {
 }
 
 // ── EXECUTE SELL ──────────────────────────────────────────────────────────────
-async function executeSell(trade, token, settings, reason, sellPercent) {
+export async function executeSell(trade, token, settings, reason, sellPercent) {
   const walletAddress = getWalletAddress();
 
   // Calculate how many tokens to sell
@@ -165,18 +189,25 @@ async function executeSell(trade, token, settings, reason, sellPercent) {
 
     const sig = await signAndSendTransaction(swapTx);
 
-    if (reason === 'partial_target') {
-      // Partial exit — mark it and reduce token amount
-      updateTrade(trade.id, {
-        partial_exit_executed: true,
-        token_amount: remainingTokens,
-        tx_signature_partial_exit: sig,
-      });
-      log('info', `[SELL] ${trade.token_symbol} — Partial exit 80% | Tx: ${sig} | ${remainingTokens} tokens remaining`);
-    } else {
-      // Full close
-      closeTrade(trade.id, token.price_usd, sig, reason);
-    }
+   const pnlPct = ((token.price_usd - trade.entry_price) / trade.entry_price) * 100;
+const pnlSol = trade.amount_sol * (pnlPct / 100);
+
+if (reason === 'partial_target') {
+  updateTrade(trade.id, {
+    partial_exit_executed: true,
+    token_amount: remainingTokens,
+    tx_signature_partial_exit: sig,
+  });
+  log('info', `[SELL] ${trade.token_symbol} — Partial exit 80% | Tx: ${sig} | ${remainingTokens} tokens remaining`);
+  await notify.partialExit(trade, pnlPct, pnlSol * 0.8);
+} else {
+  closeTrade(trade.id, token.price_usd, sig, reason);
+  if (reason === 'stop_loss' || reason === 'market_guard_red' || reason === 'market_guard_orange') {
+    await notify.stopLoss(trade, pnlPct, pnlSol);
+  } else {
+    await notify.tradeClose(trade, pnlPct, pnlSol, reason);
+  }
+}
   } catch (err) {
     log('error', `[SELL] Failed to sell ${trade.token_symbol}: ${err.message}`);
   }
