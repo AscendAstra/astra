@@ -19,20 +19,18 @@ import { log } from '../utils/logger.js';
 import {
   getStopLossCooldown,
   setStopLossCooldown,
-  getConsecutiveStopPauseUntil,
-  setConsecutiveStopPause,
-  clearConsecutiveStopPause,
-  getRecentStopLosses,
-  saveRecentStopLosses,
   pruneExpiredCooldowns,
+  isConsecutiveStopPauseActive,
+  recordStopLossForConsecutiveCheck,
+  getEntryCount,
+  recordEntry,
 } from '../utils/cooldownStore.js';
 import { notify } from '../utils/discord.js';
+import { checkHolderConcentration } from '../analysis/holderCheck.js';
+import { isTokenBlocked } from '../utils/contentFilter.js';
 
 // ── CONSTANTS ──────────────────────────────────────────────────────────────────
-const COOLDOWN_MS                = 45 * 60 * 1000; // 45 minutes per-token cooldown
-const CONSECUTIVE_STOP_WINDOW_MS = 30 * 60 * 1000; // 30 minute window
-const CONSECUTIVE_STOP_THRESHOLD = 2;               // 2 stops triggers pause
-const CONSECUTIVE_STOP_PAUSE_MS  = 90 * 60 * 1000; // 90 minute pause
+const COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes per-token cooldown
 
 // ── FAILSAFE 1: SOL PRICE TRACKER ─────────────────────────────────────────────
 const solPriceHistory        = [];
@@ -61,42 +59,6 @@ function isSolDropping() {
     return true;
   }
   return false;
-}
-
-// ── CONSECUTIVE STOP LOSS HELPERS (persistent) ────────────────────────────────
-function isConsecutiveStopPauseActive() {
-  const pauseUntil = getConsecutiveStopPauseUntil();
-  if (!pauseUntil) return false;
-
-  if (Date.now() < pauseUntil) {
-    const minsLeft = Math.ceil((pauseUntil - Date.now()) / 60000);
-    log('warn', `[MOMENTUM] ⚠ FAILSAFE 2: Consecutive stop loss pause active (${minsLeft}m remaining). Skipping all entries.`);
-    return true;
-  }
-
-  // Pause expired — clear it from disk
-  clearConsecutiveStopPause();
-  return false;
-}
-
-function recordStopLossForConsecutiveCheck() {
-  const now = Date.now();
-
-  // Load from disk, trim old entries, add new one
-  let recentStops = getRecentStopLosses();
-  recentStops.push(now);
-
-  const cutoff = now - CONSECUTIVE_STOP_WINDOW_MS;
-  recentStops = recentStops.filter(ts => ts >= cutoff);
-
-  // Check if threshold is hit
-  if (recentStops.length >= CONSECUTIVE_STOP_THRESHOLD) {
-    const pauseUntil = now + CONSECUTIVE_STOP_PAUSE_MS;
-    setConsecutiveStopPause(pauseUntil); // saves to disk + clears recentStops
-    log('warn', `[MOMENTUM] 🔴 FAILSAFE 2 TRIGGERED: ${recentStops.length} stop losses in 30 minutes. Pausing momentum entries for 90 minutes.`);
-  } else {
-    saveRecentStopLosses(recentStops); // save updated list
-  }
 }
 
 // ── MAIN MONITOR ───────────────────────────────────────────────────────────────
@@ -165,6 +127,21 @@ async function evaluateMomentumToken(token, settings) {
     momentum_volume_multiplier_max,
   } = settings;
 
+  // 0. Content filter — block offensive tokens
+  if (isTokenBlocked(token.symbol, token.name, settings)) return;
+
+  // 0b. UTC time block — data: 12-15 & 18-21 UTC = 19% WR combined, -0.643 SOL
+  const blockRanges = (settings.momentum_block_utc_ranges || '12-15,18-21')
+    .split(',')
+    .map(r => r.trim().split('-').map(Number));
+  const utcHour = new Date().getUTCHours();
+  for (const [start, end] of blockRanges) {
+    if (utcHour >= start && utcHour < end) {
+      log('info', `[MOMENTUM] UTC block active (${utcHour}:00 UTC in ${start}-${end} window). Skip.`);
+      return;
+    }
+  }
+
   // 1. MC range check
   if (token.market_cap < momentum_entry_mc_min || token.market_cap > momentum_entry_mc_max) return;
 
@@ -177,6 +154,22 @@ async function evaluateMomentumToken(token, settings) {
     const minsLeft = Math.ceil((COOLDOWN_MS - (Date.now() - lastStopLoss)) / 60000);
     log('info', `[MOMENTUM] ${token.symbol} — cooldown active (${minsLeft}m remaining). Skip.`);
     return;
+  }
+
+  // 3.5. Re-entry limit: max 1 entry per token per 24h (data: re-entries 19% WR, -0.330 SOL)
+  const entryCount = getEntryCount(token.address, 24 * 60 * 60 * 1000, STRATEGY);
+  if (entryCount >= 1) {
+    log('info', `[MOMENTUM] ${token.symbol} — max entries reached (${entryCount}/1 in 24h). Skip.`);
+    return;
+  }
+
+  // 3.6. On re-entry (2nd attempt), check holder concentration
+  if (entryCount >= 1 && settings.whale_tracking_enabled) {
+    const holders = await checkHolderConcentration(token.address);
+    if (holders.is_concentrated) {
+      log('warn', `[MOMENTUM] ${token.symbol} — whale concentrated (top 10 hold ${holders.top10_percent.toFixed(0)}%). Skip re-entry.`);
+      return;
+    }
   }
 
   // 4. Volume momentum check — min 5x (data: <5x = 0% win rate), max 12x (>12x = token likely peaked)
@@ -249,8 +242,13 @@ async function executeMomentumBuy(token, settings, volMultiplier, qualityScore) 
       quality_score:       qualityScore,
       vol_multiplier:      volMultiplier,
       slippage_bps:        slippageBps,
+      buy_pressure_entry:  token.buy_pressure,
+      pump_1h:             token.price_change_1h,
+      pump_5m:             token.price_change_5m,
+      price_change_24h:    token.price_change_24h,
     });
 
+    recordEntry(token.address, STRATEGY);
     log('info', `[MOMENTUM] ✅ Entered ${token.symbol} | Tx: ${sig}`);
     await notify.tradeOpen({ strategy: STRATEGY, token_symbol: token.symbol, entry_market_cap: token.market_cap, amount_sol: settings.momentum_trade_amount_sol, quality_score: qualityScore, vol_multiplier: volMultiplier, exit_mc_min: settings.momentum_exit_mc_min });
   } catch (err) {

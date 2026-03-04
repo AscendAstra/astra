@@ -10,6 +10,11 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { log } from './logger.js';
 
+// ── CONSECUTIVE STOP LOSS CONSTANTS (shared by momentum + scalp) ────────────
+const CONSECUTIVE_STOP_WINDOW_MS = 30 * 60 * 1000; // 30 minute window
+const CONSECUTIVE_STOP_THRESHOLD = 2;               // 2 stops triggers pause
+const CONSECUTIVE_STOP_PAUSE_MS  = 90 * 60 * 1000; // 90 minute pause
+
 const DATA_DIR  = './data';
 const FILE_PATH = './data/cooldowns.json';
 
@@ -23,6 +28,7 @@ const DEFAULT_STATE = {
   stopLossCooldowns:        {},  // { tokenAddress: timestamp }
   consecutiveStopPauseUntil: null, // timestamp or null
   recentStopLosses:         [],  // array of timestamps
+  entryHistory:             {},  // { tokenAddress: { count: N, firstEntry: timestamp } }
 };
 
 // ── LOAD FROM DISK ─────────────────────────────────────────────────────────────
@@ -131,5 +137,114 @@ export function pruneExpiredCooldowns(cooldownMs) {
   if (pruned > 0) {
     save(state);
     log('info', `[COOLDOWN STORE] Pruned ${pruned} expired cooldown(s)`);
+  }
+}
+
+// ── RE-ENTRY COUNTER (shared by momentum + scalp) ──────────────────────────
+
+/**
+ * Record an entry for a token (call after successful buy).
+ * Optional strategy param stores which strategy made the entry.
+ */
+export function recordEntry(tokenAddress, strategy = null) {
+  const state = load();
+  if (!state.entryHistory) state.entryHistory = {};
+  const existing = state.entryHistory[tokenAddress];
+  if (existing) {
+    existing.count++;
+    // Append to entries array for strategy-filtered counting
+    if (!existing.entries) existing.entries = [];
+    existing.entries.push({ at: Date.now(), strategy });
+  } else {
+    state.entryHistory[tokenAddress] = {
+      count: 1,
+      firstEntry: Date.now(),
+      entries: [{ at: Date.now(), strategy }],
+    };
+  }
+  save(state);
+}
+
+/**
+ * Get entry count for a token within a time window.
+ * When strategy is null (default), counts all entries (backwards compatible).
+ * When strategy is provided, only counts entries from that strategy.
+ * Prunes entries outside the window automatically.
+ */
+export function getEntryCount(tokenAddress, windowMs, strategy = null) {
+  const state = load();
+  if (!state.entryHistory) return 0;
+  const entry = state.entryHistory[tokenAddress];
+  if (!entry) return 0;
+
+  const now = Date.now();
+
+  // Prune if oldest entry is outside window entirely
+  if (now - entry.firstEntry > windowMs) {
+    delete state.entryHistory[tokenAddress];
+    save(state);
+    return 0;
+  }
+
+  // Prune individual stale entries from the array to prevent unbounded growth
+  if (entry.entries && entry.entries.length > 0) {
+    const before = entry.entries.length;
+    entry.entries = entry.entries.filter(e => now - e.at <= windowMs);
+    entry.count = entry.entries.length;
+    if (entry.entries.length < before) {
+      save(state); // persist pruned array
+    }
+  }
+
+  // Strategy-specific counting (for alpha token per-strategy entry caps)
+  if (strategy && entry.entries) {
+    return entry.entries.filter(e => e.strategy === strategy && now - e.at <= windowMs).length;
+  }
+
+  return entry.count;
+}
+
+// ── CONSECUTIVE STOP LOSS HELPERS (shared by momentum + scalp) ──────────────
+
+/**
+ * Check if the consecutive stop pause is currently active.
+ * Returns true if entries should be blocked.
+ */
+export function isConsecutiveStopPauseActive() {
+  const pauseUntil = getConsecutiveStopPauseUntil();
+  if (!pauseUntil) return false;
+
+  if (Date.now() < pauseUntil) {
+    const minsLeft = Math.ceil((pauseUntil - Date.now()) / 60000);
+    log('warn', `[FAILSAFE] ⚠ Consecutive stop loss pause active (${minsLeft}m remaining). Skipping all entries.`);
+    return true;
+  }
+
+  // Pause expired — clear it from disk
+  clearConsecutiveStopPause();
+  return false;
+}
+
+/**
+ * Record a stop loss for the consecutive check window.
+ * If threshold is reached, triggers the 90-minute pause.
+ */
+export function recordStopLossForConsecutiveCheck() {
+  const now = Date.now();
+
+  // Load from disk, trim old entries, add new one
+  let recentStops = getRecentStopLosses();
+  recentStops.push(now);
+
+  const cutoff = now - CONSECUTIVE_STOP_WINDOW_MS;
+  recentStops = recentStops.filter(ts => ts >= cutoff);
+
+  // Check if threshold is hit
+  if (recentStops.length >= CONSECUTIVE_STOP_THRESHOLD) {
+    const pauseUntil = now + CONSECUTIVE_STOP_PAUSE_MS;
+    setConsecutiveStopPause(pauseUntil); // saves to disk + clears recentStops
+    log('warn', `[FAILSAFE] 🔴 CONSECUTIVE STOP TRIGGERED: ${recentStops.length} stop losses in 30 minutes. Pausing all entries for 90 minutes.`);
+  } else {
+    saveRecentStopLosses(recentStops); // save updated list
   }
 }

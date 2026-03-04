@@ -54,7 +54,7 @@ export async function buildSellTransaction(tokenMint, tokenAmount, slippageBps, 
   return { swapTx, quote };
 }
 
-export function calculateSlippage(solAmount, liquidityUsd, solPrice = 150, volatility5m = 0) {
+export function calculateSlippage(solAmount, liquidityUsd, solPrice = 150, volatility5m = 0, { isSell = false } = {}) {
   const tradeUsd = solAmount * solPrice;
   const tradeImpact = tradeUsd / liquidityUsd;
   let baseBps = 100;
@@ -63,5 +63,7 @@ export function calculateSlippage(solAmount, liquidityUsd, solPrice = 150, volat
   else if (tradeImpact > 0.01) baseBps += 50;
   if (Math.abs(volatility5m) > 20) baseBps += 150;
   else if (Math.abs(volatility5m) > 10) baseBps += 75;
+  // Sells: 300 bps floor + 1500 cap — better to exit at worse price than hold a dead token
+  if (isSell) return Math.max(300, Math.min(baseBps, 1500));
   return Math.min(baseBps, 500);
 }

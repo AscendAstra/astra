@@ -9,6 +9,8 @@
  *   3. Add to your .env file: DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
  */
 
+import { sanitizeForDisplay } from './contentFilter.js';
+
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
 // ── COLORS ────────────────────────────────────────────────────────────────────
@@ -71,10 +73,11 @@ function formatPct(pct) {
 async function tradeOpen(trade) {
   const emoji = STRATEGY_EMOJI[trade.strategy] || '📈';
   const stratName = trade.strategy.charAt(0).toUpperCase() + trade.strategy.slice(1);
+  const symbol = sanitizeForDisplay(trade.token_symbol);
 
   await send({
     embeds: [{
-      title:       `${emoji} New ${stratName} Entry — ${trade.token_symbol}`,
+      title:       `${emoji} New ${stratName} Entry — ${symbol}`,
       color:       COLOR.GREEN,
       description: `ASTRA entered a new position`,
       fields: [
@@ -93,10 +96,11 @@ async function tradeOpen(trade) {
 
 async function tradeClose(trade, pnlPct, pnlSol, reason) {
   const isWin = pnlPct >= 0;
+  const symbol = sanitizeForDisplay(trade.token_symbol);
 
   await send({
     embeds: [{
-      title:       `${isWin ? '✅' : '📉'} ${trade.token_symbol} Closed — ${formatPct(pnlPct)}`,
+      title:       `${isWin ? '✅' : '📉'} ${symbol} Closed — ${formatPct(pnlPct)}`,
       color:       isWin ? COLOR.GREEN : COLOR.RED,
       description: `Position closed: **${reason.replace(/_/g, ' ').toUpperCase()}**`,
       fields: [
@@ -112,9 +116,10 @@ async function tradeClose(trade, pnlPct, pnlSol, reason) {
 }
 
 async function stopLoss(trade, pnlPct, pnlSol) {
+  const symbol = sanitizeForDisplay(trade.token_symbol);
   await send({
     embeds: [{
-      title:       `🔴 Stop Loss — ${trade.token_symbol} ${formatPct(pnlPct)}`,
+      title:       `🔴 Stop Loss — ${symbol} ${formatPct(pnlPct)}`,
       color:       COLOR.RED,
       description: `Stop loss triggered on **${trade.strategy}** position`,
       fields: [
@@ -129,9 +134,10 @@ async function stopLoss(trade, pnlPct, pnlSol) {
 }
 
 async function partialExit(trade, pnlPct, pnlSol) {
+  const symbol = sanitizeForDisplay(trade.token_symbol);
   await send({
     embeds: [{
-      title:       `⚡ Partial Exit — ${trade.token_symbol} ${formatPct(pnlPct)}`,
+      title:       `⚡ Partial Exit — ${symbol} ${formatPct(pnlPct)}`,
       color:       COLOR.GREEN,
       description: `Scalp partial exit executed (80%). Remaining 20% still running.`,
       fields: [
@@ -264,6 +270,126 @@ async function configUpdate(changes, note = '') {
   });
 }
 
+async function claudeUpdate(diff) {
+  let body = diff.recap || 'Content changed (no recap section found)';
+
+  // Truncate to Discord embed limit
+  if (body.length > 3800) {
+    body = body.substring(0, 3800) + '\n\n*... truncated*';
+  }
+
+  await send({
+    embeds: [{
+      title:       `📝 CLAUDE.md Updated`,
+      color:       COLOR.PURPLE,
+      description: body,
+      fields: [
+        { name: '➕ Added',   value: `${diff.addedCount} lines`,   inline: true },
+        { name: '➖ Removed', value: `${diff.removedCount} lines`, inline: true },
+      ],
+      footer: { text: 'ASTRA Trading Bot' },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
+async function regimeChange(prev, next, score, signals) {
+  const REGIME_EMOJI = { BEAR: '\u{1F43B}', FLAT: '\u2796', BULL: '\u{1F402}' };
+  const REGIME_COLOR = { BEAR: COLOR.RED, FLAT: COLOR.GREY, BULL: COLOR.GREEN };
+
+  const emoji = REGIME_EMOJI[next] || '\u2753';
+  const color = REGIME_COLOR[next] || COLOR.GREY;
+
+  const signalBreakdown = signals
+    ? `BTC Trend: ${signals.btcTrend > 0 ? '+' : ''}${signals.btcTrend} | F&G: ${signals.fearGreed > 0 ? '+' : ''}${signals.fearGreed}${signals.fngRaw != null ? ` (raw: ${signals.fngRaw})` : ''} | Vol: ${signals.volatility > 0 ? '+' : ''}${signals.volatility}`
+    : 'N/A';
+
+  await send({
+    embeds: [{
+      title:       `${emoji} Regime Change — ${prev} → ${next}`,
+      color:       color,
+      description: `Market regime shifted to **${next}**. Trading parameters adjusted automatically.`,
+      fields: [
+        { name: '\u{1F4CA} Composite Score', value: `${score}`,          inline: true },
+        { name: '\u{1F527} Signals',         value: signalBreakdown,     inline: false },
+      ],
+      footer: { text: 'ASTRA Regime Detector' },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
+async function alphaStageEntry(token, source, stage, mc) {
+  const symbol = sanitizeForDisplay(token.symbol || token.token_symbol || '???');
+  const stageLabel = stage.toUpperCase();
+  const mcStr = formatMC(mc);
+  const stageNum = { pumpfun: 1, midcap: 2, breakout: 3 }[stage] || '?';
+
+  await send({
+    embeds: [{
+      title:       `\u{1F3F7} Alpha Token Stage Entry`,
+      color:       COLOR.PURPLE,
+      description: `**${symbol}** (${source}) entered **${stageLabel}** at ${mcStr} MC`,
+      fields: [
+        { name: '\u{1F4CD} Strategy', value: stageLabel,         inline: true },
+        { name: '\u{1F4CA} MC',       value: mcStr,              inline: true },
+        { name: '\u{1F50D} Source',   value: source,             inline: true },
+        { name: '\u{1F9E9} Stage',    value: `${stageNum} of 3`, inline: true },
+      ],
+      footer: { text: 'ASTRA Alpha Tracker' },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
+async function quietCheckpoint({ wins, losses, netSol, bestTrade, worstTrade, byStrategy, idleMinutes, btcPrice, solPrice, sol24hChange, fng, regime, regimeScore, alertLevel }) {
+  const totalTrades = wins + losses;
+  const winRate = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(0) : '0';
+  const color = totalTrades === 0 ? COLOR.GREY : (netSol >= 0 ? COLOR.GREEN : COLOR.RED);
+
+  const fields = [
+    { name: '✅ Wins',        value: `${wins}`,                                    inline: true },
+    { name: '❌ Losses',      value: `${losses}`,                                  inline: true },
+    { name: '🎯 Win Rate',    value: `${winRate}%`,                                inline: true },
+    { name: '💰 Net PnL',     value: formatSol(netSol),                            inline: true },
+    { name: '🏆 Best Trade',  value: bestTrade  != null ? formatPct(bestTrade)  : 'N/A',   inline: true },
+    { name: '📉 Worst Trade', value: worstTrade != null ? formatPct(worstTrade) : 'N/A',   inline: true },
+  ];
+
+  // Strategy breakdown (conditional — only if trades exist)
+  if (byStrategy && Object.keys(byStrategy).length > 0) {
+    const lines = Object.entries(byStrategy).map(([strat, s]) => {
+      const wr = (s.wins + s.losses) > 0 ? ((s.wins / (s.wins + s.losses)) * 100).toFixed(0) : '0';
+      const emoji = STRATEGY_EMOJI[strat] || '📈';
+      return `${emoji} **${strat.toUpperCase()}:** ${s.wins}W/${s.losses}L (${wr}%) | ${formatSol(s.net)}`;
+    });
+    fields.push({ name: '📋 Strategy Breakdown', value: lines.join('\n'), inline: false });
+  }
+
+  // F&G emoji mapping
+  const fngEmoji = fng == null ? '❓' : fng <= 25 ? '😰' : fng <= 45 ? '😐' : fng <= 55 ? '🙂' : fng <= 75 ? '😏' : '🤩';
+
+  fields.push(
+    { name: '₿ BTC',          value: btcPrice != null ? `$${btcPrice.toLocaleString()}` : 'N/A',           inline: true },
+    { name: '◎ SOL',          value: solPrice != null ? `$${solPrice.toFixed(2)}` : 'N/A',                 inline: true },
+    { name: '◎ SOL 24h',      value: sol24hChange != null ? `${sol24hChange >= 0 ? '+' : ''}${sol24hChange.toFixed(2)}%` : 'N/A', inline: true },
+    { name: `${fngEmoji} Fear & Greed`, value: fng != null ? `${fng}` : 'N/A',                             inline: true },
+    { name: '📊 Regime',      value: regime ? `${regime} (${regimeScore ?? '?'})` : 'N/A',                 inline: true },
+    { name: '🛡 Market Guard', value: alertLevel || 'NONE',                                                inline: true },
+  );
+
+  await send({
+    embeds: [{
+      title:       `☕ Quiet Hours — Your Solana Briefing`,
+      color,
+      description: `All positions closed. ASTRA idle for ${idleMinutes} minutes. Here's your briefing.`,
+      fields,
+      footer: { text: 'ASTRA Trading Bot — Paper Trading Mode' },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
 // ── EXPORTS ───────────────────────────────────────────────────────────────────
 export const notify = {
   tradeOpen,
@@ -275,4 +401,8 @@ export const notify = {
   dailySummary,
   botStarted,
   configUpdate,
+  claudeUpdate,
+  regimeChange,
+  alphaStageEntry,
+  quietCheckpoint,
 };

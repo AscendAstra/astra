@@ -13,6 +13,9 @@ import { loadSettings } from '../config/settings.js';
 import { isRedAlert, isOrangeOrAbove } from '../utils/marketGuard.js';
 import { recordMomentumStopLoss } from '../strategies/momentum.js';
 import { recordBreakoutExit } from '../strategies/breakout.js';
+import { recordScalpStopLoss } from '../strategies/scalp.js';
+import { recordPumpfunStopLoss } from '../strategies/pumpfun.js';
+import { recordMidcapStopLoss } from '../strategies/midcap.js';
 import { log } from '../utils/logger.js';
 
 const JUPITER_PRICE_API = 'https://api.jup.ag/price/v3';
@@ -91,10 +94,21 @@ export async function runFastStopLossCheck() {
     // ── STANDARD STOP LOSS ────────────────────────────────────────────────
     const stopLoss = -(trade.stop_loss_percent || settings.stop_loss_percent);
     if (pnlPercent <= stopLoss) {
-      log('warn', `[FAST_SL] ${trade.token_symbol} stop loss hit (${pnlPercent.toFixed(2)}%). Selling immediately.`);
+      const hardKillPct = settings.hard_kill_loss_percent || 35;
+      const isHardKill = pnlPercent <= -hardKillPct;
+
+      if (isHardKill) {
+        log('warn', `[FAST_SL] ⚠ HARD KILL: ${trade.token_symbol} at ${pnlPercent.toFixed(1)}% — past -${hardKillPct}% circuit breaker. Max slippage sell.`);
+      } else {
+        log('warn', `[FAST_SL] ${trade.token_symbol} stop loss hit (${pnlPercent.toFixed(2)}%). Selling immediately.`);
+      }
+
       if (trade.strategy === 'momentum') recordMomentumStopLoss(trade.token_address);
+      if (trade.strategy === 'scalp') recordScalpStopLoss(trade.token_address);
       if (trade.strategy === 'breakout') recordBreakoutExit(trade.token_address);
-      await sellWithMinimalToken(trade, currentPrice, settings, 'stop_loss');
+      if (trade.strategy === 'pumpfun') recordPumpfunStopLoss(trade.token_address);
+      if (trade.strategy === 'midcap') recordMidcapStopLoss(trade.token_address);
+      await sellWithMinimalToken(trade, currentPrice, settings, isHardKill ? 'hard_kill' : 'stop_loss', isHardKill);
     }
   }
 }
@@ -104,12 +118,12 @@ export async function runFastStopLossCheck() {
  * executeSell expects a `token` object with price_usd, liquidity_usd, market_cap, price_change_5m.
  * We only have price — fill the rest with safe defaults so the sell logic works.
  */
-async function sellWithMinimalToken(trade, currentPrice, settings, reason) {
+async function sellWithMinimalToken(trade, currentPrice, settings, reason, hardKill = false) {
   const token = {
     price_usd:       currentPrice,
-    liquidity_usd:   50_000,   // conservative estimate for slippage calc
+    liquidity_usd:   hardKill ? 5_000 : 50_000,    // lower liquidity → higher slippage for hard kill
     market_cap:      0,
-    price_change_5m: 0,
+    price_change_5m: hardKill ? -30 : 0,            // signal extreme volatility for slippage calc
   };
   try {
     await executeSell(trade, token, settings, reason, 100);

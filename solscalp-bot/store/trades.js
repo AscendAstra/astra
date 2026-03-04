@@ -86,6 +86,7 @@ export function closeTrade(id, exitPrice, exitTxSig, reason = 'target') {
 
   const updated = updateTrade(id, {
     status: reason === 'stop_loss' ? 'stopped' : 'completed',
+    exit_reason: reason,
     exit_price: exitPrice,
     exit_time: new Date().toISOString(),
     tx_signature_exit: exitTxSig,

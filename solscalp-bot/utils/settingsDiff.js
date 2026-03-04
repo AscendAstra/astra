@@ -44,6 +44,10 @@ const SAFE_KEYS = [
   'momentum_volume_multiplier_max',
   'momentum_trade_amount_sol',
   'momentum_stop_loss_percent',
+  'momentum_sell_pressure_enabled',
+  'momentum_sell_pressure_threshold',
+  'momentum_target_gain_percent',
+  'momentum_block_utc_ranges',
 
   // Scalp
   'scalp_enabled',
@@ -52,6 +56,13 @@ const SAFE_KEYS = [
   'scalp_exit_mc',
   'scalp_trade_amount_sol',
   'scalp_stop_loss_percent',
+  'scalp_volume_multiplier',
+  'scalp_volume_multiplier_max',
+  'scalp_sell_pressure_enabled',
+  'scalp_sell_pressure_threshold',
+
+  // Stale trade
+  'stale_trade_timeout_ms',
 
   // Breakout
   'breakout_enabled',
@@ -59,10 +70,62 @@ const SAFE_KEYS = [
   'breakout_entry_mc_max',
   'breakout_volume_multiplier',
   'breakout_min_5m_pump',
+  'breakout_min_1h_pump',
   'breakout_min_buy_pressure',
   'breakout_trade_amount_sol',
   'breakout_stop_loss_percent',
   'breakout_target_gain_percent',
+  'breakout_sell_pressure_enabled',
+  'breakout_sell_pressure_threshold',
+
+  // Pumpfun
+  'pumpfun_enabled',
+  'pumpfun_min_mc',
+  'pumpfun_max_mc',
+  'pumpfun_max_age_minutes',
+  'pumpfun_min_sol_volume',
+  'pumpfun_min_buy_pressure',
+  'pumpfun_trade_amount_sol',
+  'pumpfun_target_gain_pct',
+  'pumpfun_stop_loss_pct',
+  'pumpfun_max_concurrent',
+  'pumpfun_stale_timeout_ms',
+  'pumpfun_alpha_only',
+  'pumpfun_alpha_min_mc',
+  'pumpfun_alpha_min_sol_volume',
+  'pumpfun_alpha_min_buy_pressure',
+  'pumpfun_sell_pressure_enabled',
+  'pumpfun_sell_pressure_threshold',
+
+  // Midcap
+  'midcap_enabled',
+  'midcap_entry_mc_min',
+  'midcap_entry_mc_max',
+  'midcap_trade_amount_sol',
+  'midcap_target_gain_percent',
+  'midcap_stop_loss_percent',
+  'midcap_volume_multiplier',
+  'midcap_volume_multiplier_max',
+  'midcap_min_1h_pump',
+  'midcap_min_5m_pump',
+  'midcap_min_buy_pressure',
+  'midcap_min_liquidity',
+  'midcap_max_24h_pump',
+  'midcap_max_entries_per_token',
+  'midcap_interval_ms',
+  'midcap_sell_pressure_enabled',
+  'midcap_sell_pressure_threshold',
+
+  // Content filter
+  'content_filter_enabled',
+
+  // Alpha tracking
+  'alpha_tracking_enabled',
+
+  // Quiet hours checkpoint
+  'quiet_checkpoint_enabled',
+  'quiet_checkpoint_delay_ms',
+  'quiet_checkpoint_cooldown_ms',
 ];
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────

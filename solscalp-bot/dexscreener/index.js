@@ -1,14 +1,29 @@
 /**
  * DexScreener API - Token scanning and market data
+ * Jupiter Token API V2 - Supplemental discovery via top-traded tokens
  */
 
+import { log } from '../utils/logger.js';
+
 const DEXSCREENER_BASE = 'https://api.dexscreener.com';
+
+// ── FETCH CACHE (TTL 60s) ──────────────────────────────────────────────────
+// Prevents duplicate DexScreener calls when multiple strategies share the same
+// fetch function on overlapping intervals (momentum 45s + scalp 90s, etc.)
+const FETCH_CACHE_TTL_MS = 60_000;
+let topTokensCache    = { ts: 0, data: null };
+const midCapCache     = new Map(); // "mcMin:mcMax" → { ts, data }
 
 /**
  * Fetch top Solana tokens by volume (micro-cap focus — used by momentum + scalp)
  * Uses multiple DexScreener search endpoints to build a list of ~250 tokens
  */
 export async function fetchTopSolanaTokens() {
+  // Return cached result if fresh
+  if (topTokensCache.data && Date.now() - topTokensCache.ts < FETCH_CACHE_TTL_MS) {
+    return topTokensCache.data;
+  }
+
   const seen = new Map();
 
   const fetchers = [
@@ -36,30 +51,94 @@ export async function fetchTopSolanaTokens() {
     }
   }
 
-  return Array.from(seen.values())
+  const result = Array.from(seen.values())
     .sort((a, b) => b.volume_24h - a.volume_24h)
     .slice(0, 250);
+
+  topTokensCache = { ts: Date.now(), data: result };
+  return result;
+}
+
+/**
+ * Fetch top-traded token addresses from Jupiter Token API V2.
+ * Returns mint addresses pre-filtered to a coarse MC range (wider than breakout).
+ * Fails open: any error → empty array + warning log.
+ */
+async function fetchJupiterTopTraded() {
+  try {
+    const headers = {};
+    if (process.env.JUPITER_API_KEY) {
+      headers['x-api-key'] = process.env.JUPITER_API_KEY;
+    }
+    const res = await fetch('https://api.jup.ag/tokens/v2/toptraded/1h?limit=100', { headers });
+    if (!res.ok) {
+      log('warn', `[DEXSCREENER] Jupiter toptraded API returned ${res.status}`);
+      return [];
+    }
+    const data = await res.json();
+    const tokens = Array.isArray(data) ? data : (data.tokens || []);
+
+    return tokens
+      .filter(t => t.mcap >= 500_000 && t.mcap <= 50_000_000)
+      .map(t => t.id || t.address || t.mint)
+      .filter(Boolean);
+  } catch (err) {
+    log('warn', `[DEXSCREENER] Jupiter toptraded fetch failed: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * Batch-fetch token data from DexScreener by addresses.
+ * Chunks into groups of 30 (DexScreener limit), normalizes through filterAndNormalize().
+ * Fails open per batch.
+ */
+async function fetchBatchDexScreenerTokens(addresses) {
+  const results = [];
+  const chunkSize = 30;
+
+  for (let i = 0; i < addresses.length; i += chunkSize) {
+    const chunk = addresses.slice(i, i + chunkSize);
+    try {
+      const joined = chunk.join(',');
+      const res = await fetch(`${DEXSCREENER_BASE}/tokens/v1/solana/${joined}`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const pairs = Array.isArray(data) ? data : (data.pairs || []);
+      results.push(...filterAndNormalize(pairs));
+    } catch {}
+  }
+
+  return results;
 }
 
 /**
  * Fetch mid-cap Solana tokens ($2M–$20M range) — used by breakout strategy.
  *
- * DexScreener has no server-side MC filter, so we use two parallel strategies:
+ * Two discovery sources merged:
+ * 1. DexScreener keyword searches (21 terms) — established mid-cap tokens
+ * 2. Jupiter toptraded/1h — top tokens by actual swap volume (catches novel names)
  *
- * 1. Search terms that surface established mid-cap tokens (not pump.fun micro-caps)
- * 2. Fetch by h1 price change trending — tokens actively moving right now
- *
- * Both lists are merged, deduped, and filtered client-side to $2M–$20M MC.
- * This typically yields 20–40 candidates vs the 6 the old approach found.
+ * Jupiter provides only addresses; full data comes from DexScreener batch lookup.
+ * Both lists are merged, deduped, and filtered client-side to MC range.
  */
-export async function fetchMidCapSolanaTokens(mcMin = 2_000_000, mcMax = 20_000_000) {
+export async function fetchMidCapSolanaTokens(mcMin = 2_000_000, mcMax = 20_000_000, opts = {}) {
+  const { jupiterDiscovery = true } = opts;
+
+  // Return cached result if fresh (keyed by MC range — midcap and breakout use different ranges)
+  const cacheKey = `${mcMin}:${mcMax}`;
+  const cached   = midCapCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < FETCH_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
   const seen = new Map();
 
   // These search terms reliably surface established Solana mid-caps:
   // — Major Solana ecosystem tokens
   // — Established meme coins that have graduated to mid-cap
   // — DeFi/utility tokens in the $2M–$20M range
-  const fetchers = [
+  const keywordFetchers = [
     // Ecosystem & DeFi tokens
     fetchBySearch('solana'),
     fetchBySearch('raydium'),
@@ -85,15 +164,48 @@ export async function fetchMidCapSolanaTokens(mcMin = 2_000_000, mcMax = 20_000_
     fetchBySearch('network'),
   ];
 
-  const results = await Promise.allSettled(fetchers);
+  // Run keyword searches + Jupiter discovery in parallel
+  const parallelWork = [...keywordFetchers];
+  if (jupiterDiscovery) {
+    parallelWork.push(fetchJupiterTopTraded());
+  }
 
-  for (const result of results) {
+  const results = await Promise.allSettled(parallelWork);
+
+  // Separate keyword results from Jupiter addresses
+  const keywordResults = results.slice(0, keywordFetchers.length);
+  let jupiterAddresses = [];
+  if (jupiterDiscovery && results.length > keywordFetchers.length) {
+    const jupResult = results[keywordFetchers.length];
+    if (jupResult.status === 'fulfilled') {
+      jupiterAddresses = jupResult.value;
+    }
+  }
+
+  // Merge keyword search results
+  for (const result of keywordResults) {
     if (result.status === 'fulfilled') {
       for (const pair of result.value) {
         if (!seen.has(pair.address)) {
           seen.set(pair.address, pair);
         }
       }
+    }
+  }
+
+  // Jupiter discovery: filter out already-found addresses, batch-lookup the rest
+  if (jupiterAddresses.length > 0) {
+    const newAddresses = jupiterAddresses.filter(addr => !seen.has(addr));
+    if (newAddresses.length > 0) {
+      const jupTokens = await fetchBatchDexScreenerTokens(newAddresses);
+      let added = 0;
+      for (const pair of jupTokens) {
+        if (!seen.has(pair.address)) {
+          seen.set(pair.address, pair);
+          added++;
+        }
+      }
+      log('info', `[DEXSCREENER] Jupiter discovery: +${added} new candidates (${newAddresses.length} looked up)`);
     }
   }
 
@@ -104,6 +216,7 @@ export async function fetchMidCapSolanaTokens(mcMin = 2_000_000, mcMax = 20_000_
     .sort((a, b) => b.volume_1h - a.volume_1h)
     .slice(0, 100);
 
+  midCapCache.set(cacheKey, { ts: Date.now(), data: midCaps });
   return midCaps;
 }
 
@@ -192,6 +305,7 @@ function normalizePair(p) {
     price_usd:        parseFloat(p.priceUsd || 0),
     price_change_5m:  parseFloat(p.priceChange?.m5  || 0),
     price_change_1h:  parseFloat(p.priceChange?.h1  || 0),
+    price_change_6h:  parseFloat(p.priceChange?.h6  || 0),
     price_change_24h: parseFloat(p.priceChange?.h24 || 0),
     market_cap:       mc,
     liquidity_usd:    liq,

@@ -38,6 +38,9 @@ export function getKeypair() {
 }
 
 export async function getWalletBalance() {
+  const settings = loadSettings();
+  if (settings.paper_trading) return 100; // virtual balance for paper mode
+
   const conn = getConnection();
   const kp = getKeypair();
   const lamports = await conn.getBalance(kp.publicKey);

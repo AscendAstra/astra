@@ -11,6 +11,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { log } from './logger.js';
 import { notify } from './discord.js';
+import { runRegimeDetection } from './regimeDetector.js';
 
 // ── PERSISTENCE ──────────────────────────────────────────────────────────────
 const DATA_DIR       = './data';
@@ -248,6 +249,9 @@ export async function runMarketGuardCheck() {
 
   log('info', `[MARKET GUARD] BTC: $${btcPrice.toLocaleString()} | 1h: ${btcDrop1h.toFixed(2)}% | 30m: ${btcDrop30m.toFixed(2)}% | 4h: ${btcDrop4h.toFixed(2)}% | Vol: ${volatilityMultiplier.toFixed(1)}x`);
 
+  // ── REGIME DETECTION (piggybacks on this 5-min check) ───────────────────
+  await runRegimeDetection(btcPriceHistory, btcVolatilityHistory, baselineVolatility);
+
   // ── RED ────────────────────────────────────────────────────────────────────
   if (btcDrop30m >= RED_BTC_DROP_30M_PCT || (baselineVolatility && volatilityMultiplier >= RED_VOLATILITY_MULTIPLIER)) {
     const reason = btcDrop30m >= RED_BTC_DROP_30M_PCT
@@ -282,3 +286,8 @@ export function isOrangeOrAbove()   { return currentAlertLevel === ALERT_LEVEL.O
 export function getMarketGuardStatus() {
   return { alertLevel: currentAlertLevel, alertTriggeredAt, stableHoursCount: stableHoursCount.toFixed(1), baselineVolatility };
 }
+
+// ── REGIME DETECTOR DATA ACCESS ─────────────────────────────────────────────
+export function getBtcPriceHistory()      { return btcPriceHistory; }
+export function getBtcVolatilityHistory() { return btcVolatilityHistory; }
+export function getBaselineVolatility()   { return baselineVolatility; }
