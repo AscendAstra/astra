@@ -210,17 +210,29 @@ function handleTrade(data) {
       candidate.estimated_mc = vSol * 2 * _solPriceUsd;
     }
 
-    // Keep price tracking for P&L
-    if (tokenAmount > 0 && solAmount > 0) {
-      candidate.last_price = solAmount / tokenAmount;
+    // Keep price tracking for P&L — use bonding curve spot price, not per-trade ratio.
+    // Per-trade solAmount/tokenAmount can spike wildly on small trades, causing fake P&L.
+    const vSolCandidate  = parseFloat(data.vSolInBondingCurve || 0);
+    const vTokenCandidate = parseFloat(data.vTokensInBondingCurve || 0);
+    if (vSolCandidate > 0 && vTokenCandidate > 0) {
+      candidate.last_price = vSolCandidate / vTokenCandidate;
+    } else if (tokenAmount > 0 && solAmount > 0) {
+      candidate.last_price = solAmount / tokenAmount; // fallback if curve data missing
     }
     candidate.last_trade_at = Date.now();
   }
 
   // Update position price tracking if we own this token
   const pos = positions.get(mint);
-  if (pos && tokenAmount > 0 && solAmount > 0) {
-    pos.current_price = solAmount / tokenAmount;
+  if (pos) {
+    // Use bonding curve spot price — not per-trade ratio which spikes on small trades
+    const vSolPos  = parseFloat(data.vSolInBondingCurve || 0);
+    const vTokenPos = parseFloat(data.vTokensInBondingCurve || 0);
+    if (vSolPos > 0 && vTokenPos > 0) {
+      pos.current_price = vSolPos / vTokenPos;
+    } else if (tokenAmount > 0 && solAmount > 0) {
+      pos.current_price = solAmount / tokenAmount; // fallback
+    }
     // Use marketCapSol for MC if available, otherwise estimate from candidate
     const mCapSol = parseFloat(data.marketCapSol || data.market_cap_sol || 0);
     if (mCapSol > 0) {
