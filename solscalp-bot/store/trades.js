@@ -61,6 +61,11 @@ export function createTrade(data) {
     partial_exit_executed: false,
     pnl_percent: 0,
     pnl_sol: 0,
+    sol_spent: null,
+    sol_received: null,
+    actual_pnl_sol: null,
+    entry_balance_before: null,
+    exit_balance_after: null,
     ...data,
   };
   trades.push(trade);

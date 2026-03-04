@@ -8,7 +8,7 @@ import { runMarketGuardCheck, isMarketDangerous, getAlertLevel } from '../utils/
 import { fetchTopSolanaTokens } from '../dexscreener/index.js';
 import { evaluateTokenQuality, basicHoneypotCheck } from '../analysis/scoring.js';
 import { buildBuyTransaction, calculateSlippage } from '../jupiter/index.js';
-import { signAndSendTransaction, getWalletAddress, getWalletBalance } from '../wallet/custodial.js';
+import { signAndSendTransaction, getWalletAddress, getWalletBalance, getTokenBalance } from '../wallet/custodial.js';
 import {
   createTrade,
   hasActiveTradeForToken,
@@ -172,7 +172,19 @@ async function evaluateMomentumToken(token, settings) {
     }
   }
 
-  // 4. Volume momentum check — min 5x (data: <5x = 0% win rate), max 12x (>12x = token likely peaked)
+  // 4. 5m momentum gate — data: negative 5m entries = 35% WR (-0.11 SOL), positive = 48% WR (+0.18 SOL)
+  if (token.price_change_5m != null && token.price_change_5m < settings.momentum_min_5m_pump) {
+    log('info', `[MOMENTUM] ${token.symbol} — 5m pump ${token.price_change_5m.toFixed(1)}% below min (${settings.momentum_min_5m_pump}%). Skip.`);
+    return;
+  }
+
+  // 4b. 1h pump cap — data: 1h >30% = 38% WR (-0.21 SOL), buying tops
+  if (token.price_change_1h != null && token.price_change_1h > settings.momentum_max_1h_pump) {
+    log('info', `[MOMENTUM] ${token.symbol} — 1h pump +${token.price_change_1h.toFixed(0)}% exceeds cap (${settings.momentum_max_1h_pump}%). Skip.`);
+    return;
+  }
+
+  // 5. Volume momentum check — min 9x (data: 9-12x = 58% WR, 5-9x = 33% WR), max 12x (>12x = token likely peaked)
   const hourlyAvg     = token.volume_24h / 24;
   const volMultiplier = hourlyAvg > 0 ? token.volume_1h / hourlyAvg : 0;
   if (volMultiplier < momentum_volume_multiplier) return;
@@ -181,7 +193,7 @@ async function evaluateMomentumToken(token, settings) {
     return;
   }
 
-  // 5. Buy pressure check
+  // 6. Buy pressure check
   if (token.buy_pressure < 55) return;
 
   // 6. Liquidity check
@@ -217,6 +229,8 @@ async function executeMomentumBuy(token, settings, volMultiplier, qualityScore) 
   log('info', `[MOMENTUM] Entering ${token.symbol} — ${settings.momentum_trade_amount_sol} SOL | Vol: ${volMultiplier.toFixed(1)}x | slippage: ${slippageBps}bps`);
 
   try {
+    const balanceBefore = await getWalletBalance();
+
     const { swapTx, quote } = await buildBuyTransaction(
       token.address,
       settings.momentum_trade_amount_sol,
@@ -225,6 +239,16 @@ async function executeMomentumBuy(token, settings, volMultiplier, qualityScore) 
     );
 
     const sig = await signAndSendTransaction(swapTx);
+
+    // Verify tokens actually received (skip in paper mode)
+    const receivedBalance = await getTokenBalance(token.address);
+    if (receivedBalance !== null && receivedBalance === 0) {
+      log('error', `[MOMENTUM] Buy tx ${sig} confirmed but no tokens received. Skipping trade creation.`);
+      return;
+    }
+
+    const balanceAfter = await getWalletBalance();
+    const sol_spent = balanceBefore - balanceAfter;
 
     createTrade({
       strategy:            STRATEGY,
@@ -246,6 +270,8 @@ async function executeMomentumBuy(token, settings, volMultiplier, qualityScore) 
       pump_1h:             token.price_change_1h,
       pump_5m:             token.price_change_5m,
       price_change_24h:    token.price_change_24h,
+      sol_spent,
+      entry_balance_before: balanceBefore,
     });
 
     recordEntry(token.address, STRATEGY);

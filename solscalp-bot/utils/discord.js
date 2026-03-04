@@ -98,17 +98,20 @@ async function tradeClose(trade, pnlPct, pnlSol, reason) {
   const isWin = pnlPct >= 0;
   const symbol = sanitizeForDisplay(trade.token_symbol);
 
+  const fields = [
+    { name: '📈 P&L %',       value: formatPct(pnlPct),               inline: true },
+    { name: '💰 Est. P&L',    value: formatSol(pnlSol),               inline: true },
+    { name: '💵 Actual P&L',  value: trade.actual_pnl_sol != null ? formatSol(trade.actual_pnl_sol) : 'N/A', inline: true },
+    { name: '🎯 Strategy',    value: trade.strategy,                   inline: true },
+    { name: '📍 Entry MC',    value: formatMC(trade.entry_market_cap), inline: true },
+  ];
+
   await send({
     embeds: [{
       title:       `${isWin ? '✅' : '📉'} ${symbol} Closed — ${formatPct(pnlPct)}`,
       color:       isWin ? COLOR.GREEN : COLOR.RED,
       description: `Position closed: **${reason.replace(/_/g, ' ').toUpperCase()}**`,
-      fields: [
-        { name: '📈 P&L %',       value: formatPct(pnlPct),               inline: true },
-        { name: '💰 P&L SOL',     value: formatSol(pnlSol),               inline: true },
-        { name: '🎯 Strategy',    value: trade.strategy,                   inline: true },
-        { name: '📍 Entry MC',    value: formatMC(trade.entry_market_cap), inline: true },
-      ],
+      fields,
       footer: { text: 'ASTRA Trading Bot' },
       timestamp: new Date().toISOString(),
     }],
@@ -117,16 +120,18 @@ async function tradeClose(trade, pnlPct, pnlSol, reason) {
 
 async function stopLoss(trade, pnlPct, pnlSol) {
   const symbol = sanitizeForDisplay(trade.token_symbol);
+  const fields = [
+    { name: '📉 Loss %',      value: formatPct(pnlPct),               inline: true },
+    { name: '💰 Est. Loss',   value: formatSol(pnlSol),               inline: true },
+    { name: '💵 Actual P&L',  value: trade.actual_pnl_sol != null ? formatSol(trade.actual_pnl_sol) : 'N/A', inline: true },
+    { name: '📍 Entry MC',    value: formatMC(trade.entry_market_cap), inline: true },
+  ];
   await send({
     embeds: [{
       title:       `🔴 Stop Loss — ${symbol} ${formatPct(pnlPct)}`,
       color:       COLOR.RED,
       description: `Stop loss triggered on **${trade.strategy}** position`,
-      fields: [
-        { name: '📉 Loss %',      value: formatPct(pnlPct),               inline: true },
-        { name: '💰 Loss SOL',    value: formatSol(pnlSol),               inline: true },
-        { name: '📍 Entry MC',    value: formatMC(trade.entry_market_cap), inline: true },
-      ],
+      fields,
       footer: { text: 'ASTRA Trading Bot' },
       timestamp: new Date().toISOString(),
     }],
@@ -390,6 +395,45 @@ async function quietCheckpoint({ wins, losses, netSol, bestTrade, worstTrade, by
   });
 }
 
+async function walletReconciliation(orphans, phantoms) {
+  const lines = [];
+  for (const o of orphans) {
+    lines.push(`**Orphan:** \`${o.mint.slice(0, 8)}...\` — ${o.balance} tokens (no trade)`);
+  }
+  for (const p of phantoms) {
+    lines.push(`**Phantom:** ${p.symbol} (\`${p.id}\`) — trade active, 0 tokens → force closed`);
+  }
+
+  await send({
+    embeds: [{
+      title:       `🔍 Wallet Reconciliation`,
+      color:       COLOR.ORANGE,
+      description: lines.join('\n') || 'No issues found.',
+      fields: [
+        { name: 'Orphaned Tokens', value: `${orphans.length}`, inline: true },
+        { name: 'Phantom Trades',  value: `${phantoms.length}`, inline: true },
+      ],
+      footer: { text: 'ASTRA Reconciliation' },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
+async function killSwitch(count) {
+  await send({
+    embeds: [{
+      title:       `🚨 KILL SWITCH ACTIVATED`,
+      color:       COLOR.RED,
+      description: `Emergency shutdown triggered. All trading halted.`,
+      fields: [
+        { name: '📊 Trades Closed', value: `${count}`, inline: true },
+      ],
+      footer: { text: 'ASTRA Kill Switch' },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}
+
 // ── EXPORTS ───────────────────────────────────────────────────────────────────
 export const notify = {
   tradeOpen,
@@ -405,4 +449,6 @@ export const notify = {
   regimeChange,
   alphaStageEntry,
   quietCheckpoint,
+  walletReconciliation,
+  killSwitch,
 };

@@ -10,7 +10,7 @@
 import { isRedAlert, isOrangeOrAbove } from '../utils/marketGuard.js';
 import { fetchTokenData } from '../dexscreener/index.js';
 import { buildSellTransaction, calculateSlippage } from '../jupiter/index.js';
-import { signAndSendTransaction, getWalletAddress } from '../wallet/custodial.js';
+import { signAndSendTransaction, getWalletAddress, getWalletBalance, getTokenBalance } from '../wallet/custodial.js';
 import {
   getActiveTrades,
   updateTrade,
@@ -298,6 +298,8 @@ export async function executeSell(trade, token, settings, reason, sellPercent) {
   );
 
   try {
+    const balanceBefore = await getWalletBalance();
+
     const { swapTx } = await buildSellTransaction(
       trade.token_address,
       tokensToSell,
@@ -307,9 +309,22 @@ export async function executeSell(trade, token, settings, reason, sellPercent) {
 
     const sig = await signAndSendTransaction(swapTx);
 
+    // Verify tokens actually left wallet (skip in paper mode, skip for partial sells)
+    if (reason !== 'partial_target') {
+      const remainingBalance = await getTokenBalance(trade.token_address);
+      if (remainingBalance !== null && remainingBalance > 0) {
+        log('error', `[SELL] Sell tx ${sig} confirmed but tokens still in wallet (${remainingBalance}). Not closing trade.`);
+        pendingSells.delete(trade.id);
+        return;
+      }
+    }
+
     // Success — clear failure counter + race guard
     sellFailures.delete(trade.id);
     pendingSells.delete(trade.id);
+
+    const balanceAfter = await getWalletBalance();
+    const sol_received = balanceAfter - balanceBefore;
 
     const pnlPct = ((token.price_usd - trade.entry_price) / trade.entry_price) * 100;
     const pnlSol = trade.amount_sol * (pnlPct / 100);
@@ -323,11 +338,23 @@ export async function executeSell(trade, token, settings, reason, sellPercent) {
       log('info', `[SELL] ${trade.token_symbol} — Partial exit 80% | Tx: ${sig} | ${remainingTokens} tokens remaining`);
       await notify.partialExit(trade, pnlPct, pnlSol * 0.8);
     } else {
+      // Compute actual PnL from wallet balance diff
+      const actual_pnl_sol = (trade.sol_spent != null) ? sol_received - trade.sol_spent : null;
+
       closeTrade(trade.id, token.price_usd, sig, reason);
+      updateTrade(trade.id, {
+        sol_received,
+        exit_balance_after: balanceAfter,
+        actual_pnl_sol,
+      });
+
+      // Re-fetch trade for Discord notification (now has actual_pnl_sol)
+      const updatedTrade = { ...trade, actual_pnl_sol };
+
       if (reason === 'stop_loss' || reason === 'market_guard_red' || reason === 'market_guard_orange') {
-        await notify.stopLoss(trade, pnlPct, pnlSol);
+        await notify.stopLoss(updatedTrade, pnlPct, pnlSol);
       } else {
-        await notify.tradeClose(trade, pnlPct, pnlSol, reason);
+        await notify.tradeClose(updatedTrade, pnlPct, pnlSol, reason);
       }
     }
   } catch (err) {

@@ -25,7 +25,7 @@ import { isMarketDangerous, getAlertLevel } from '../utils/marketGuard.js';
 import { fetchMidCapSolanaTokens } from '../dexscreener/index.js';
 import { evaluateTokenQuality, basicHoneypotCheck } from '../analysis/scoring.js';
 import { buildBuyTransaction, calculateSlippage } from '../jupiter/index.js';
-import { signAndSendTransaction, getWalletAddress, getWalletBalance } from '../wallet/custodial.js';
+import { signAndSendTransaction, getWalletAddress, getWalletBalance, getTokenBalance } from '../wallet/custodial.js';
 import {
   createTrade,
   hasActiveTradeForToken,
@@ -198,6 +198,8 @@ async function executeMidcapBuy(token, settings, volMultiplier, quality) {
   log('info', `[MIDCAP] Entering ${token.symbol} — ${settings.midcap_trade_amount_sol} SOL | slippage: ${slippageBps}bps`);
 
   try {
+    const balanceBefore = await getWalletBalance();
+
     const { swapTx, quote } = await buildBuyTransaction(
       token.address,
       settings.midcap_trade_amount_sol,
@@ -206,6 +208,16 @@ async function executeMidcapBuy(token, settings, volMultiplier, quality) {
     );
 
     const sig = await signAndSendTransaction(swapTx);
+
+    // Verify tokens actually received (skip in paper mode)
+    const receivedBalance = await getTokenBalance(token.address);
+    if (receivedBalance !== null && receivedBalance === 0) {
+      log('error', `[MIDCAP] Buy tx ${sig} confirmed but no tokens received. Skipping trade creation.`);
+      return;
+    }
+
+    const balanceAfter = await getWalletBalance();
+    const sol_spent = balanceBefore - balanceAfter;
 
     createTrade({
       strategy:             STRATEGY,
@@ -225,6 +237,8 @@ async function executeMidcapBuy(token, settings, volMultiplier, quality) {
       quality_score:        quality.score,
       slippage_bps:         slippageBps,
       price_change_24h:     token.price_change_24h,
+      sol_spent,
+      entry_balance_before: balanceBefore,
     });
 
     recordEntry(token.address, STRATEGY);

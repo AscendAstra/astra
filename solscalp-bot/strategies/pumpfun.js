@@ -2,9 +2,10 @@
  * Strategy 4: Pump.fun Pre-Migration Scalp ("Final Stretch")
  * Inspired by Decu0x — buy momentum on bonding curve, sell before graduation.
  *
- * Entry: MC $6K–$60K on Pump.fun bonding curve, age ≤60min, volume ≥25 SOL, buy pressure ≥60%
+ * Entry: MC $6K–$25K on Pump.fun bonding curve, age ≤10min, volume ≥40 SOL, buy pressure ≥65%
  *         Alpha tokens: MC $4K+, volume ≥10 SOL, buy pressure ≥55% (relaxed — detected early)
- * Exit:  +25% target | -20% stop loss | MC ceiling $60K (approaching graduation) | 10min stale
+ *         Curve acceleration: ≥2 consecutive rising vSol ticks (bonding curve filling, not draining)
+ * Exit:  +25% target | -20% stop loss | MC ceiling $25K (approaching graduation) | 10min stale
  *
  * Discovery: PumpPortal WebSocket (real-time trade events)
  * Execution: Jupiter (routes through Pump.fun bonding curve)
@@ -12,11 +13,13 @@
 
 import { PumpPortalWS } from '../pumpfun/portal.js';
 import { buildBuyTransaction, buildSellTransaction, calculateSlippage } from '../jupiter/index.js';
-import { signAndSendTransaction, getWalletAddress, getWalletBalance } from '../wallet/custodial.js';
+import { signAndSendTransaction, getWalletAddress, getWalletBalance, getTokenBalance } from '../wallet/custodial.js';
 import {
   createTrade,
+  updateTrade,
   hasActiveTradeForToken,
   getActiveTrades,
+  getAllTrades,
   isDailyLossLimitReached,
   closeTrade,
 } from '../store/trades.js';
@@ -157,6 +160,8 @@ function handleNewToken(data) {
     estimated_mc: 0,
     buy_pressure: 50,
     last_trade_at: Date.now(),
+    prev_vSol:     0,
+    curve_rising:  0,
   });
 
   // Subscribe to trade events for this token
@@ -219,6 +224,14 @@ function handleTrade(data) {
     } else if (tokenAmount > 0 && solAmount > 0) {
       candidate.last_price = solAmount / tokenAmount; // fallback if curve data missing
     }
+    // Track curve acceleration (consecutive rising vSol ticks)
+    const vSolCurve = parseFloat(data.vSolInBondingCurve || 0);
+    if (vSolCurve > 0 && candidate.prev_vSol > 0) {
+      if (vSolCurve > candidate.prev_vSol) candidate.curve_rising++;
+      else candidate.curve_rising = 0;
+    }
+    if (vSolCurve > 0) candidate.prev_vSol = vSolCurve;
+
     candidate.last_trade_at = Date.now();
   }
 
@@ -300,20 +313,26 @@ async function evaluateCandidate(candidate, settings) {
     return;
   }
 
-  // 5. Concurrent positions cap
+  // 5. Curve acceleration — require bonding curve actively filling (not draining)
+  if (candidate.curve_rising < 2) {
+    logReject(candidate.mint, candidate.symbol, 'curve declining', `rising ticks: ${candidate.curve_rising} < 2`);
+    return;
+  }
+
+  // 6. Concurrent positions cap
   const activePumpfun = getActiveTrades().filter(t => t.strategy === STRATEGY);
   if (activePumpfun.length >= pumpfun_max_concurrent) {
     logReject(candidate.mint, candidate.symbol, 'max concurrent', `${activePumpfun.length}/${pumpfun_max_concurrent}`);
     return;
   }
 
-  // 6. Already have active trade for this token
+  // 7. Already have active trade for this token
   if (hasActiveTradeForToken(candidate.mint, STRATEGY)) {
     logReject(candidate.mint, candidate.symbol, 'already active');
     return;
   }
 
-  // 7. Per-token cooldown
+  // 8. Per-token cooldown
   const lastStop = getStopLossCooldown(candidate.mint);
   if (lastStop && Date.now() - lastStop < COOLDOWN_MS) {
     const cdRemain = ((COOLDOWN_MS - (Date.now() - lastStop)) / 60_000).toFixed(0);
@@ -321,32 +340,32 @@ async function evaluateCandidate(candidate, settings) {
     return;
   }
 
-  // 8. Re-entry limit: max 1 entry per token per 24h
+  // 9. Re-entry limit: max 1 entry per token per 24h
   const entryCount = getEntryCount(candidate.mint, 24 * 60 * 60 * 1000);
   if (entryCount >= 1) {
     logReject(candidate.mint, candidate.symbol, 're-entry cap', `${entryCount}/1 in 24h`);
     return;
   }
 
-  // 9. Daily loss limit
+  // 10. Daily loss limit
   if (isDailyLossLimitReached(daily_loss_limit_sol)) {
     logReject(candidate.mint, candidate.symbol, 'daily loss limit');
     return;
   }
 
-  // 10. Market guard
+  // 11. Market guard
   if (isMarketDangerous()) {
     log('info', `[PUMPFUN] Market guard active (${getAlertLevel()}). Skip ${candidate.symbol}.`);
     return;
   }
 
-  // 11. Consecutive stop pause
+  // 12. Consecutive stop pause
   if (isConsecutiveStopPauseActive()) {
     logReject(candidate.mint, candidate.symbol, 'consecutive stop pause');
     return;
   }
 
-  // 12. Balance check
+  // 13. Balance check
   const balance = await getWalletBalance();
   if (balance < settings.pumpfun_trade_amount_sol) {
     logReject(candidate.mint, candidate.symbol, 'insufficient balance', `${balance.toFixed(3)} SOL < ${settings.pumpfun_trade_amount_sol} SOL`);
@@ -379,6 +398,8 @@ async function executeBuy(candidate, settings, curvePct) {
   log('info', `[PUMPFUN] Buying ${candidate.symbol} — ${settings.pumpfun_trade_amount_sol} SOL | slippage: ${slippageBps}bps`);
 
   try {
+    const balanceBefore = await getWalletBalance();
+
     const { swapTx, quote } = await buildBuyTransaction(
       candidate.mint,
       settings.pumpfun_trade_amount_sol,
@@ -387,6 +408,17 @@ async function executeBuy(candidate, settings, curvePct) {
     );
 
     const sig = await signAndSendTransaction(swapTx);
+
+    // Verify tokens actually received (skip in paper mode)
+    const receivedBalance = await getTokenBalance(candidate.mint);
+    if (receivedBalance !== null && receivedBalance === 0) {
+      log('error', `[PUMPFUN] Buy tx ${sig} confirmed but no tokens received. Skipping trade creation.`);
+      pendingBuys.delete(candidate.mint);
+      return;
+    }
+
+    const balanceAfter = await getWalletBalance();
+    const sol_spent = balanceBefore - balanceAfter;
 
     const trade = createTrade({
       strategy:            STRATEGY,
@@ -403,6 +435,8 @@ async function executeBuy(candidate, settings, curvePct) {
       entry_sol_volume:    candidate.sol_volume,
       entry_buy_pressure:  candidate.buy_pressure,
       entry_age_minutes:   (Date.now() - candidate.created_at) / 60_000,
+      sol_spent,
+      entry_balance_before: balanceBefore,
     });
 
     // Start tracking position
@@ -415,6 +449,8 @@ async function executeBuy(candidate, settings, curvePct) {
       entry_time:    Date.now(),
       token_amount:  parseInt(quote.outAmount),
     });
+
+    pendingBuys.delete(candidate.mint); // position tracked — pendingBuys guard no longer needed
 
     recordEntry(candidate.mint, STRATEGY);
 
@@ -507,6 +543,8 @@ async function executeSell(mint, reason, currentPrice, settings) {
   log('info', `[PUMPFUN] Selling ${mint.slice(0, 8)}... — reason: ${reason} | slippage: ${slippageBps}bps`);
 
   try {
+    const balanceBefore = await getWalletBalance();
+
     const { swapTx, quote } = await buildSellTransaction(
       mint,
       pos.token_amount,
@@ -515,12 +553,35 @@ async function executeSell(mint, reason, currentPrice, settings) {
     );
 
     const sig = await signAndSendTransaction(swapTx);
+
+    // Verify tokens actually left wallet (skip in paper mode)
+    const remainingBalance = await getTokenBalance(mint);
+    if (remainingBalance !== null && remainingBalance > 0) {
+      log('error', `[PUMPFUN] Sell tx ${sig} confirmed but tokens still in wallet (${remainingBalance}). Not closing trade.`);
+      pendingSells.delete(mint);
+      return;
+    }
+
     const exitPrice = currentPrice || pos.current_price;
 
     closeTrade(pos.trade_id, exitPrice, sig, reason);
 
+    const balanceAfter = await getWalletBalance();
+    const sol_received = balanceAfter - balanceBefore;
+
     const pnlPct = ((exitPrice - pos.entry_price) / pos.entry_price) * 100;
     const pnlSol = settings.pumpfun_trade_amount_sol * (pnlPct / 100);
+
+    // Update actual PnL from wallet balance diff
+    try {
+      const tradeData = getAllTrades().find(t => t.id === pos.trade_id);
+      const actual_pnl_sol = (tradeData?.sol_spent != null) ? sol_received - tradeData.sol_spent : null;
+      updateTrade(pos.trade_id, {
+        sol_received,
+        exit_balance_after: balanceAfter,
+        actual_pnl_sol,
+      });
+    } catch { /* non-critical — estimated PnL still works */ }
 
     log('info', `[PUMPFUN] Sold ${mint.slice(0, 8)}... | ${pnlPct.toFixed(1)}% | ${pnlSol.toFixed(4)} SOL | reason: ${reason} | Tx: ${sig}`);
 

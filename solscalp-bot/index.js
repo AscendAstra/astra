@@ -21,6 +21,7 @@ import { getRegimeStatus } from './utils/regimeDetector.js';
 import { getActiveTrades, getAllTrades } from './store/trades.js';
 import { getAlertLevel, getBtcPriceHistory } from './utils/marketGuard.js';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { reconcileWallet } from './utils/walletReconcile.js';
 
 console.log('Discord webhook URL:', process.env.DISCORD_WEBHOOK_URL ? 'LOADED ✅' : 'MISSING ❌');
 
@@ -194,6 +195,14 @@ async function main() {
 
   isRunning = true;
   loadQuietState();
+
+  // Wallet reconciliation — detect orphaned tokens and phantom trades
+  try {
+    await reconcileWallet();
+  } catch (err) {
+    log('error', `[STARTUP] Wallet reconciliation failed: ${err.message}`);
+  }
+
   log('info', 'All systems nominal. Starting strategy loops...');
 
   // Run all strategies concurrently

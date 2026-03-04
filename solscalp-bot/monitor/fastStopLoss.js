@@ -24,7 +24,7 @@ const JUPITER_PRICE_API = 'https://api.jup.ag/price/v3';
  * Fetch USD prices for a list of token mints via Jupiter Price API v3.
  * Returns a map of { mint: priceUsd } for tokens that had a price.
  */
-async function fetchJupiterPrices(mints) {
+export async function fetchJupiterPrices(mints) {
   const url = `${JUPITER_PRICE_API}?ids=${mints.join(',')}`;
   const res = await fetch(url, {
     method: 'GET',

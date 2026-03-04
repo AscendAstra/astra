@@ -9,6 +9,9 @@ import { getActiveTrades, getAllTrades, getState } from '../store/trades.js';
 import { getWalletAddress, getWalletBalance } from '../wallet/custodial.js';
 import { loadSettings } from '../config/settings.js';
 import { log } from '../utils/logger.js';
+import { executeSell } from '../monitor/activeTrades.js';
+import { fetchJupiterPrices } from '../monitor/fastStopLoss.js';
+import { notify } from '../utils/discord.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -22,8 +25,8 @@ export function addToLogBuffer(entry) {
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Content-Type': 'application/json',
   };
 }
@@ -74,6 +77,54 @@ export async function startApiServer() {
 
       } else if (url === '/logs') {
         send(res, { logs: logBuffer.slice().reverse() });
+
+      } else if (url === '/kill' && req.method === 'POST') {
+        // Kill switch — close all positions and halt trading
+        const killToken = process.env.KILL_SWITCH_TOKEN;
+        if (killToken) {
+          const authHeader = req.headers['authorization'] || '';
+          const token = authHeader.replace('Bearer ', '');
+          if (token !== killToken) {
+            send(res, { error: 'Unauthorized' }, 401);
+            return;
+          }
+        }
+
+        log('warn', '[KILL SWITCH] Activated via API — closing all positions and halting trading.');
+        process.env.IS_BOT_ACTIVE = 'false';
+
+        const active = getActiveTrades();
+        let closed = 0;
+
+        if (active.length > 0) {
+          const settings = loadSettings();
+          const mints = active.map(t => t.token_address);
+          let prices = {};
+          try {
+            prices = await fetchJupiterPrices(mints);
+          } catch (err) {
+            log('warn', `[KILL SWITCH] Price fetch failed: ${err.message}`);
+          }
+
+          for (const trade of active) {
+            const currentPrice = prices[trade.token_address] || trade.entry_price;
+            const token = {
+              price_usd: currentPrice,
+              liquidity_usd: 50_000,
+              market_cap: 0,
+              price_change_5m: 0,
+            };
+            try {
+              await executeSell(trade, token, settings, 'kill_switch', 100);
+              closed++;
+            } catch (err) {
+              log('error', `[KILL SWITCH] Failed to sell ${trade.token_symbol}: ${err.message}`);
+            }
+          }
+        }
+
+        await notify.killSwitch(closed);
+        send(res, { killed: true, trades_closed: closed });
 
       } else {
         send(res, { error: 'Not found' }, 404);

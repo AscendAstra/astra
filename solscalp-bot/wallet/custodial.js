@@ -95,6 +95,58 @@ export async function signAndSendTransaction(swapTransaction) {
   }
 }
 
+/**
+ * Get token balance for a specific mint address.
+ * Returns the token amount (UI amount) or 0 if no account exists.
+ * Paper mode: returns null (skip verification).
+ */
+export async function getTokenBalance(mintAddress) {
+  const settings = loadSettings();
+  if (settings.paper_trading) return null;
+
+  const conn = getConnection();
+  const kp = getKeypair();
+  try {
+    const accounts = await conn.getParsedTokenAccountsByOwner(kp.publicKey, {
+      mint: new PublicKey(mintAddress),
+    });
+    if (accounts.value.length === 0) return 0;
+    return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount || 0;
+  } catch (err) {
+    log('warn', `[WALLET] Failed to fetch token balance for ${mintAddress}: ${err.message}`);
+    return null; // treat as unverifiable on error
+  }
+}
+
+/**
+ * Get all SPL token accounts in the wallet.
+ * Paper mode: returns [].
+ */
+export async function getTokenAccounts() {
+  const settings = loadSettings();
+  if (settings.paper_trading) return [];
+
+  const conn = getConnection();
+  const kp = getKeypair();
+  try {
+    const accounts = await conn.getParsedTokenAccountsByOwner(kp.publicKey, {
+      programId: new PublicKey('TokenkegQEcnFio5t7BRsva2SJntWEkDJwqKKEVbuNhB7e'),
+    });
+    return accounts.value.map(a => {
+      const info = a.account.data.parsed.info;
+      return {
+        mint: info.mint,
+        balance: info.tokenAmount.amount,
+        uiAmount: info.tokenAmount.uiAmount,
+        decimals: info.tokenAmount.decimals,
+      };
+    });
+  } catch (err) {
+    log('warn', `[WALLET] Failed to fetch token accounts: ${err.message}`);
+    return [];
+  }
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }

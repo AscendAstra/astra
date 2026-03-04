@@ -25,7 +25,7 @@ import { fetchMidCapSolanaTokens } from '../dexscreener/index.js';
 import { evaluateTokenQuality, basicHoneypotCheck } from '../analysis/scoring.js';
 import { checkDowntrend } from '../analysis/trendCheck.js';
 import { buildBuyTransaction, calculateSlippage } from '../jupiter/index.js';
-import { signAndSendTransaction, getWalletAddress, getWalletBalance } from '../wallet/custodial.js';
+import { signAndSendTransaction, getWalletAddress, getWalletBalance, getTokenBalance } from '../wallet/custodial.js';
 import {
   createTrade,
   hasActiveTradeForToken,
@@ -225,6 +225,8 @@ async function executeBreakoutBuy(token, settings, volMultiplier, quality, isDow
   log('info', `[BREAKOUT] Entering ${token.symbol} — ${settings.breakout_trade_amount_sol} SOL | slippage: ${slippageBps}bps`);
 
   try {
+    const balanceBefore = await getWalletBalance();
+
     const { swapTx, quote } = await buildBuyTransaction(
       token.address,
       settings.breakout_trade_amount_sol,
@@ -233,6 +235,16 @@ async function executeBreakoutBuy(token, settings, volMultiplier, quality, isDow
     );
 
     const sig = await signAndSendTransaction(swapTx);
+
+    // Verify tokens actually received (skip in paper mode)
+    const receivedBalance = await getTokenBalance(token.address);
+    if (receivedBalance !== null && receivedBalance === 0) {
+      log('error', `[BREAKOUT] Buy tx ${sig} confirmed but no tokens received. Skipping trade creation.`);
+      return;
+    }
+
+    const balanceAfter = await getWalletBalance();
+    const sol_spent = balanceBefore - balanceAfter;
 
     createTrade({
       strategy:             STRATEGY,
@@ -256,6 +268,8 @@ async function executeBreakoutBuy(token, settings, volMultiplier, quality, isDow
       volume_6h:            token.volume_6h,
       volume_mc_ratio:      token.volume_mc_ratio,
       pair_age_hours:       token.created_at ? (Date.now() - token.created_at) / 3600000 : null,
+      sol_spent,
+      entry_balance_before: balanceBefore,
     });
 
     recordEntry(token.address, STRATEGY);

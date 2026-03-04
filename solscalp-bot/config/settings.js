@@ -75,7 +75,7 @@ export function loadSettings() {
     momentum_entry_mc_max:          parseFloat(process.env.MOMENTUM_ENTRY_MC_MAX     || '100000'),
     momentum_exit_mc_min:           parseFloat(process.env.MOMENTUM_EXIT_MC_MIN      || '135000'),
     momentum_exit_mc_max:           parseFloat(process.env.MOMENTUM_EXIT_MC_MAX      || '180000'),
-    momentum_volume_multiplier:     parseFloat(process.env.MOMENTUM_VOLUME_MULT      || '5'),   // raised from 2 — data shows <5x vol = 0% win rate
+    momentum_volume_multiplier:     parseFloat(process.env.MOMENTUM_VOLUME_MULT      || '9'),   // raised from 5 — data: 9-12x = 58% WR (+0.17 SOL), 5-9x = 33% WR (-0.16 SOL)
     momentum_volume_multiplier_max: parseFloat(process.env.MOMENTUM_VOLUME_MULT_MAX  || '12'),  // new cap — >12x vol = token likely already peaked
     momentum_trade_amount_sol:      parseFloat(process.env.MOMENTUM_TRADE_AMOUNT_SOL || '0.1'),
     momentum_stop_loss_percent:     parseFloat(process.env.MOMENTUM_STOP_LOSS        || '20'),
@@ -83,6 +83,8 @@ export function loadSettings() {
     momentum_sell_pressure_enabled:     process.env.MOMENTUM_SELL_PRESSURE_ENABLED !== 'false',
     momentum_sell_pressure_threshold:   parseFloat(process.env.MOMENTUM_SELL_PRESSURE_THRESHOLD || '35'),
     momentum_target_gain_percent:       parseFloat(process.env.MOMENTUM_TARGET_GAIN || '25'),
+    momentum_min_5m_pump:               parseFloat(process.env.MOMENTUM_MIN_5M_PUMP || '0'),      // data: negative 5m = 35% WR (-0.11 SOL), positive = 48% WR (+0.18 SOL)
+    momentum_max_1h_pump:               parseFloat(process.env.MOMENTUM_MAX_1H_PUMP || '30'),     // data: 1h >30% = 38% WR (-0.21 SOL) — buying tops
     momentum_block_utc_ranges:          process.env.MOMENTUM_BLOCK_UTC_RANGES || '12-15,18-21',
 
     // ── BREAKOUT STRATEGY ───────────────────────────────────────────────────
@@ -90,7 +92,7 @@ export function loadSettings() {
     breakout_entry_mc_min:          parseFloat(process.env.BREAKOUT_ENTRY_MC_MIN     || '2000000'),
     breakout_entry_mc_max:          parseFloat(process.env.BREAKOUT_ENTRY_MC_MAX     || '20000000'),
     breakout_volume_multiplier:     parseFloat(process.env.BREAKOUT_VOLUME_MULT      || '1.5'),
-    breakout_min_5m_pump:           parseFloat(process.env.BREAKOUT_MIN_5M_PUMP      || '2'),
+    breakout_min_5m_pump:           parseFloat(process.env.BREAKOUT_MIN_5M_PUMP      || '3'),    // raised from 2 — data: 5m<3% = 26% runner rate, 5m>=3% = 43% runner rate
     breakout_min_buy_pressure:      parseFloat(process.env.BREAKOUT_MIN_BUY_PRESSURE || '55'),
     breakout_trade_amount_sol:      parseFloat(process.env.BREAKOUT_TRADE_AMOUNT_SOL || '0.2'),
     breakout_stop_loss_percent:     parseFloat(process.env.BREAKOUT_STOP_LOSS        || '12'),
@@ -109,7 +111,7 @@ export function loadSettings() {
     breakout_dt_volume_multiplier:  parseFloat(process.env.BREAKOUT_DT_VOLUME_MULT       || '3'),
     breakout_dt_min_liquidity:      parseFloat(process.env.BREAKOUT_DT_MIN_LIQUIDITY     || '250000'),
     breakout_dt_stop_loss_percent:  parseFloat(process.env.BREAKOUT_DT_STOP_LOSS         || '8'),
-    breakout_min_1h_pump:           parseFloat(process.env.BREAKOUT_MIN_1H_PUMP          || '5'),
+    breakout_min_1h_pump:           parseFloat(process.env.BREAKOUT_MIN_1H_PUMP          || '10'),   // raised from 5 — data: 1h<10% = 0 runners in 27 trades, dead money
     breakout_max_24h_pump:          parseFloat(process.env.BREAKOUT_MAX_24H_PUMP         || '200'),
 
     // ── BREAKOUT JUPITER DISCOVERY ──────────────────────────────────────────────
@@ -127,7 +129,7 @@ export function loadSettings() {
     midcap_volume_multiplier:       parseFloat(process.env.MIDCAP_VOLUME_MULT          || '2'),
     midcap_volume_multiplier_max:   parseFloat(process.env.MIDCAP_VOLUME_MULT_MAX      || '10'),
     midcap_min_1h_pump:             parseFloat(process.env.MIDCAP_MIN_1H_PUMP          || '5'),
-    midcap_min_5m_pump:             parseFloat(process.env.MIDCAP_MIN_5M_PUMP          || '1'),
+    midcap_min_5m_pump:             parseFloat(process.env.MIDCAP_MIN_5M_PUMP          || '3'),    // raised from 1 — data: 5m<3% duds avg +0.4% PnL, 5m>=3% runner rate 35% avg +4.4%
     midcap_min_buy_pressure:        parseFloat(process.env.MIDCAP_MIN_BUY_PRESSURE     || '55'),
     midcap_min_liquidity:           parseFloat(process.env.MIDCAP_MIN_LIQUIDITY        || '25000'),
     midcap_max_24h_pump:            parseFloat(process.env.MIDCAP_MAX_24H_PUMP         || '300'),
@@ -139,10 +141,10 @@ export function loadSettings() {
     // ── PUMPFUN PRE-MIGRATION STRATEGY ────────────────────────────────────────
     pumpfun_enabled:                process.env.PUMPFUN_ENABLED !== 'false',
     pumpfun_min_mc:                 parseFloat(process.env.PUMPFUN_MIN_MC             || '6000'),
-    pumpfun_max_mc:                 parseFloat(process.env.PUMPFUN_MAX_MC             || '60000'),
-    pumpfun_max_age_minutes:        parseInt(process.env.PUMPFUN_MAX_AGE_MINUTES      || '60'),
-    pumpfun_min_sol_volume:         parseFloat(process.env.PUMPFUN_MIN_SOL_VOLUME     || '25'),
-    pumpfun_min_buy_pressure:       parseFloat(process.env.PUMPFUN_MIN_BUY_PRESSURE   || '60'),
+    pumpfun_max_mc:                 parseFloat(process.env.PUMPFUN_MAX_MC             || '25000'),
+    pumpfun_max_age_minutes:        parseInt(process.env.PUMPFUN_MAX_AGE_MINUTES      || '10'),
+    pumpfun_min_sol_volume:         parseFloat(process.env.PUMPFUN_MIN_SOL_VOLUME     || '40'),
+    pumpfun_min_buy_pressure:       parseFloat(process.env.PUMPFUN_MIN_BUY_PRESSURE   || '65'),
     pumpfun_trade_amount_sol:       parseFloat(process.env.PUMPFUN_TRADE_AMOUNT_SOL   || '0.1'),
     pumpfun_target_gain_pct:        parseFloat(process.env.PUMPFUN_TARGET_GAIN        || '25'),
     pumpfun_stop_loss_pct:          parseFloat(process.env.PUMPFUN_STOP_LOSS          || '20'),

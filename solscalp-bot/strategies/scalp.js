@@ -8,7 +8,7 @@ import { isMarketDangerous, getAlertLevel } from '../utils/marketGuard.js';
 import { fetchTopSolanaTokens } from '../dexscreener/index.js';
 import { computeHealthScore, basicHoneypotCheck } from '../analysis/scoring.js';
 import { buildBuyTransaction, buildSellTransaction, calculateSlippage } from '../jupiter/index.js';
-import { signAndSendTransaction, getWalletAddress, getWalletBalance } from '../wallet/custodial.js';
+import { signAndSendTransaction, getWalletAddress, getWalletBalance, getTokenBalance } from '../wallet/custodial.js';
 import {
   createTrade,
   updateTrade,
@@ -198,6 +198,8 @@ async function executeScalpBuy(token, settings, health, volMultiplier) {
   log('info', `[SCALP] Entering ${token.symbol} — ${settings.scalp_trade_amount_sol} SOL, slippage: ${slippageBps}bps`);
 
   try {
+    const balanceBefore = await getWalletBalance();
+
     const { swapTx, quote } = await buildBuyTransaction(
       token.address,
       settings.scalp_trade_amount_sol,
@@ -207,6 +209,16 @@ async function executeScalpBuy(token, settings, health, volMultiplier) {
 
     const sig = await signAndSendTransaction(swapTx);
     const tokenAmount = parseInt(quote.outAmount);
+
+    // Verify tokens actually received (skip in paper mode)
+    const receivedBalance = await getTokenBalance(token.address);
+    if (receivedBalance !== null && receivedBalance === 0) {
+      log('error', `[SCALP] Buy tx ${sig} confirmed but no tokens received. Skipping trade creation.`);
+      return;
+    }
+
+    const balanceAfter = await getWalletBalance();
+    const sol_spent = balanceBefore - balanceAfter;
 
     createTrade({
       strategy:             STRATEGY,
@@ -226,6 +238,8 @@ async function executeScalpBuy(token, settings, health, volMultiplier) {
       pump_1h:              token.price_change_1h,
       pump_5m:              token.price_change_5m,
       price_change_24h:     token.price_change_24h,
+      sol_spent,
+      entry_balance_before: balanceBefore,
     });
 
     recordEntry(token.address);
